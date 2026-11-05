@@ -1,0 +1,427 @@
+diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/__main__.py
+--- a/kokoro/__main__.py
++++ b/kokoro/__main__.py
+@@ -1,24 +1,16 @@
+-"""Kokoro TTS CLI
+-Example usage:
+-python3 -m kokoro --text "The sky above the port was the color of television, tuned to a dead channel." -o file.wav --debug
+-
+-echo "Bom dia mundo, como vão vocês" > text.txt
+-python3 -m kokoro -i text.txt -l p --voice pm_alex > audio.wav
+-
+-Common issues:
+-pip not installed: `uv pip install pip`
+-(Temporary workaround while https://github.com/explosion/spaCy/issues/13747 is not fixed)
++"""Kokoro TTS CLI.
+ 
+-espeak not installed: `apt-get install espeak-ng`
++kokoro -m af_heart -o hello.wav
++kokoro -m thorsten -o hallo.wav
++kokoro --list-voices
+ """
+ 
+ import argparse
++import json
++import os
++import sys
+ import wave
+ from pathlib import Path
+-from typing import Generator, TYPE_CHECKING
+-
+-import numpy as np
+-from loguru import logger
+ 
+ languages = [
+     "a",  # American English
+@@ -33,60 +25,126 @@
+     "z",  # Mandarin Chinese
+ ]
+ 
+-if TYPE_CHECKING:
+-    from kokoro import KPipeline
+-
++SHARE = Path(os.environ.get("KOKORO_SHARE", "/usr/share/kokoro"))
++DEFAULT_MODEL = "kokoro-v1_0"
+ 
+-def generate_audio(
+-    text: str, kokoro_language: str, voice: str, speed=1
+-) -> Generator["KPipeline.Result", None, None]:
+-    from kokoro import KPipeline
+-
+-    if not voice.startswith(kokoro_language):
+-        logger.warning(f"Voice {voice} is not made for language {kokoro_language}")
+-    pipeline = KPipeline(lang_code=kokoro_language)
+-    yield from pipeline(text, voice=voice, speed=speed, split_pattern=r"\n+")
+-
+-
+-def generate_and_save_audio(
+-    output_file: Path, text: str, kokoro_language: str, voice: str, speed=1
+-) -> None:
+-    with wave.open(str(output_file.resolve()), "wb") as wav_file:
+-        wav_file.setnchannels(1)  # Mono audio
+-        wav_file.setsampwidth(2)  # 2 bytes per sample (16-bit audio)
+-        wav_file.setframerate(24000)  # Sample rate
+-
+-        for result in generate_audio(
+-            text, kokoro_language=kokoro_language, voice=voice, speed=speed
+-        ):
+-            logger.debug(result.phonemes)
+-            if result.audio is None:
+-                continue
+-            audio_bytes = (result.audio.numpy() * 32767).astype(np.int16).tobytes()
+-            wav_file.writeframes(audio_bytes)
++VOICE_PACKAGES = {
++    "a": "kokoro-voices-en",
++    "b": "kokoro-voices-en",
++    "d": "kokoro-voice-thorsten",
++    "e": "kokoro-voices-es",
++    "f": "kokoro-voices-fr",
++    "h": "kokoro-voices-hi",
++    "i": "kokoro-voices-it",
++    "j": "kokoro-voices-ja",
++    "p": "kokoro-voices-pt",
++    "z": "kokoro-voices-zh",
++}
++
++MODEL_PACKAGES = {
++    "kokoro-v1_0": "kokoro-model",
++    "kokoro-v1_1-zh": "kokoro-model",
++    "thorsten": "kokoro-voice-thorsten",
++}
++
++
++def voice_file(name: str) -> Path:
++    path = Path(name)
++    if path.suffix == ".pt" or path.is_file():
++        return path
++    return SHARE / "voices" / f"{name}.pt"
++
++
++def voice_meta(path: Path) -> dict:
++    meta_path = path.with_suffix(".json")
++    if not meta_path.is_file():
++        return {}
++    with meta_path.open(encoding="utf-8") as handle:
++        data = json.load(handle)
++    if not isinstance(data, dict):
++        raise SystemExit(f"{meta_path} is not a JSON object")
++    return data
++
++
++def installed_voices():
++    directory = SHARE / "voices"
++    if not directory.is_dir():
++        return []
++    rows = []
++    for path in sorted(directory.glob("*.pt")):
++        meta = voice_meta(path)
++        language = meta.get("language") or (path.stem[:1])
++        model = meta.get("model") or DEFAULT_MODEL
++        rows.append((path.stem, str(language), str(model)))
++    return rows
++
++
++def list_voices() -> None:
++    rows = installed_voices()
++    if not rows:
++        print(f"No voices installed under {SHARE / 'voices'}", file=sys.stderr)
++        print("Install kokoro-voices or kokoro-voice-thorsten.", file=sys.stderr)
++        raise SystemExit(1)
++    for name, language, model in rows:
++        print(f"{name}\tlanguage={language}\tmodel={model}")
++
++
++def model_files(model_name: str):
++    directory = SHARE / "models" / model_name
++    config = directory / "config.json"
++    weights = None
++    for candidate in (directory / f"{model_name}.pth", directory / "model.pth"):
++        if candidate.is_file():
++            weights = candidate
++            break
++    return config, weights
++
++
++def require_voice(name: str) -> Path:
++    path = voice_file(name)
++    if path.is_file():
++        return path
++    stem = Path(name).stem
++    package = "kokoro-voice-thorsten" if stem == "thorsten" else VOICE_PACKAGES.get(stem[:1], "kokoro-voices")
++    installed = ", ".join(row[0] for row in installed_voices()) or "(none)"
++    raise SystemExit(
++        f"Voice {name!r} is not installed ({path}).\n"
++        f"Install {package}.\n"
++        f"Installed voices: {installed}"
++    )
++
++
++def require_model(model_name: str):
++    config, weights = model_files(model_name)
++    if config.is_file() and weights is not None:
++        return config, weights
++    package = MODEL_PACKAGES.get(model_name, "kokoro-model")
++    raise SystemExit(
++        f"Kokoro model {model_name!r} is not installed under {SHARE / 'models' / model_name}.\n"
++        f"Install {package}."
++    )
+ 
+ 
+ def main() -> None:
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument(
+-        "-m",
+-        "--voice",
+-        default="af_heart",
+-        help="Voice to use",
+-    )
++    parser = argparse.ArgumentParser(prog="kokoro")
++    parser.add_argument("-m", "--voice", default="af_heart", help="Voice name or .pt path")
+     parser.add_argument(
+         "-l",
+         "--language",
+-        help="Language to use (defaults to the one corresponding to the voice)",
+         choices=languages,
++        help="Language code. Default is the voice metadata, or the first letter of the voice name",
++    )
++    parser.add_argument(
++        "--model",
++        help="Model directory name under /usr/share/kokoro/models. Default is the voice metadata, or kokoro-v1_0",
+     )
++    parser.add_argument("--list-voices", action="store_true", help="List installed voices and exit")
+     parser.add_argument(
+         "-o",
+         "--output-file",
+         "--output_file",
+         type=Path,
+         help="Path to output WAV file",
+-        required=True,
+     )
+     parser.add_argument(
+         "-i",
+@@ -95,54 +153,71 @@
+         type=Path,
+         help="Path to input text file (default: stdin)",
+     )
+-    parser.add_argument(
+-        "-t",
+-        "--text",
+-        help="Text to use instead of reading from stdin",
+-    )
+-    parser.add_argument(
+-        "-s",
+-        "--speed",
+-        type=float,
+-        default=1.0,
+-        help="Speech speed",
+-    )
+-    parser.add_argument(
+-        "--debug",
+-        action="store_true",
+-        help="Print DEBUG messages to console",
+-    )
++    parser.add_argument("-t", "--text", help="Text to use instead of reading from stdin")
++    parser.add_argument("-s", "--speed", type=float, default=1.0, help="Speech speed")
++    parser.add_argument("--debug", action="store_true", help="Print DEBUG messages to console")
+     args = parser.parse_args()
+-    if args.debug:
+-        logger.level("DEBUG")
+-    logger.debug(args)
+ 
+-    lang = args.language or args.voice[0]
++    if args.list_voices:
++        list_voices()
++        return
++    if args.output_file is None:
++        raise SystemExit("An output file is required (-o FILE.wav).")
++
++    voice = require_voice(args.voice)
++    meta = voice_meta(voice)
++    lang = args.language or meta.get("language") or voice.stem[:1]
++    if lang not in languages:
++        raise SystemExit(
++            f"Cannot tell which language {args.voice!r} uses. "
++            f"Pass -l with one of: {' '.join(languages)}"
++        )
++    model_name = args.model or meta.get("model") or DEFAULT_MODEL
++    config, weights = require_model(model_name)
+ 
+     if args.text is not None and args.input_file is not None:
+-        raise Exception("You cannot specify both 'text' and 'input_file'")
+-    elif args.text:
++        raise SystemExit("You cannot specify both 'text' and 'input_file'")
++    if args.text is not None:
+         text = args.text
+-    elif args.input_file:
+-        file: Path = args.input_file
+-        text = file.read_text()
++    elif args.input_file is not None:
++        text = args.input_file.read_text(encoding="utf-8")
+     else:
+-        import sys
+-        print("Press Ctrl+D to stop reading input and start generating", flush=True)
+-        text = '\n'.join(sys.stdin)
++        if sys.stdin.isatty():
++            print("Press Ctrl+D to stop reading input and start generating", flush=True)
++        text = sys.stdin.read()
++
++    import numpy as np
++    import torch
++    from loguru import logger
++    from kokoro import KModel, KPipeline
+ 
+-    logger.debug(f"Input text: {text!r}")
++    if args.debug:
++        logger.level("DEBUG")
++    if not meta.get("language") and not voice.stem.startswith(lang):
++        logger.warning(f"Voice {voice.stem} is not made for language {lang}")
++
++    device = "cuda" if torch.cuda.is_available() else "cpu"
++    kmodel = KModel(
++        repo_id="hexgrad/Kokoro-82M",
++        config=str(config),
++        model=str(weights),
++    ).to(device).eval()
++    pipeline = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=kmodel)
+ 
+     out_file: Path = args.output_file
+-    if not out_file.suffix == ".wav":
++    if out_file.suffix != ".wav":
+         logger.warning("The output file name should end with .wav")
+-    generate_and_save_audio(
+-        output_file=out_file,
+-        text=text,
+-        kokoro_language=lang,
+-        voice=args.voice,
+-        speed=args.speed,
+-    )
++    with wave.open(str(out_file.resolve()), "wb") as wav_file:
++        wav_file.setnchannels(1)
++        wav_file.setsampwidth(2)
++        wav_file.setframerate(24000)
++        for result in pipeline(text, voice=str(voice), speed=args.speed, split_pattern=r"\n+"):
++            if args.debug:
++                logger.debug(result.phonemes)
++            if result.audio is None:
++                continue
++            audio = result.audio.numpy() if hasattr(result.audio, "numpy") else result.audio
++            wav_file.writeframes((audio * 32767).astype(np.int16).tobytes())
+ 
+ 
+ if __name__ == "__main__":
+diff -Naur pristine/kokoro/kokoro/model.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/model.py
+--- a/kokoro/model.py
++++ b/kokoro/model.py
+@@ -6,6 +6,7 @@
+ from transformers import AlbertConfig
+ from typing import Dict, Optional, Union
+ import json
++import os
+ import torch
+ 
+ class KModel(torch.nn.Module):
+@@ -40,6 +41,28 @@
+             repo_id = 'hexgrad/Kokoro-82M'
+             print(f"WARNING: Defaulting repo_id to {repo_id}. Pass repo_id='{repo_id}' to suppress this warning.")
+         self.repo_id = repo_id
++        if not isinstance(config, dict) and not config and not model:
++            share = os.environ.get('KOKORO_SHARE', '/usr/share/kokoro')
++            local_names = {
++                'hexgrad/Kokoro-82M': 'kokoro-v1_0',
++                'hexgrad/Kokoro-82M-v1.1-zh': 'kokoro-v1_1-zh',
++            }
++            local_name = local_names.get(repo_id, repo_id.replace('/', '-'))
++            local_dir = os.path.join(share, 'models', local_name)
++            local_config = os.path.join(local_dir, 'config.json')
++            if os.path.isfile(local_config):
++                for weight_name in (
++                    KModel.MODEL_NAMES.get(repo_id, ''),
++                    local_name + '.pth',
++                    'model.pth',
++                ):
++                    if not weight_name:
++                        continue
++                    local_weight = os.path.join(local_dir, weight_name)
++                    if os.path.isfile(local_weight):
++                        config = local_config
++                        model = local_weight
++                        break
+         if not isinstance(config, dict):
+             if not config:
+                 logger.debug("No config provided, downloading from HF")
+diff -Naur pristine/kokoro/kokoro/pipeline.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/pipeline.py
+--- a/kokoro/pipeline.py
++++ b/kokoro/pipeline.py
+@@ -4,6 +4,7 @@
+ from loguru import logger
+ from misaki import en, espeak
+ from typing import Callable, Generator, List, Optional, Tuple, Union
++import json
+ import re
+ import torch
+ import os
+@@ -155,14 +156,31 @@
+     def load_single_voice(self, voice: str):
+         if voice in self.voices:
+             return self.voices[voice]
+-        if voice.endswith('.pt'):
++        if voice.endswith('.pt') or os.path.isfile(voice):
+             f = voice
+         else:
+-            f = hf_hub_download(repo_id=self.repo_id, filename=f'voices/{voice}.pt')
+-            if not voice.startswith(self.lang_code):
+-                v = LANG_CODES.get(voice, voice)
+-                p = LANG_CODES.get(self.lang_code, self.lang_code)
+-                logger.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
++            share = os.environ.get('KOKORO_SHARE', '/usr/share/kokoro')
++            local = os.path.join(share, 'voices', voice + '.pt')
++            meta_path = os.path.join(share, 'voices', voice + '.json')
++            if os.path.isfile(local):
++                f = local
++                expected = None
++                if os.path.isfile(meta_path):
++                    with open(meta_path, encoding='utf-8') as meta_file:
++                        expected = json.load(meta_file).get('language')
++                if expected:
++                    if expected != self.lang_code:
++                        logger.warning(f'Language mismatch, loading {voice} ({expected}) into {self.lang_code} pipeline.')
++                elif not voice.startswith(self.lang_code):
++                    v = LANG_CODES.get(voice, voice)
++                    p = LANG_CODES.get(self.lang_code, self.lang_code)
++                    logger.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
++            else:
++                f = hf_hub_download(repo_id=self.repo_id, filename=f'voices/{voice}.pt')
++                if not voice.startswith(self.lang_code):
++                    v = LANG_CODES.get(voice, voice)
++                    p = LANG_CODES.get(self.lang_code, self.lang_code)
++                    logger.warning(f'Language mismatch, loading {v} voice into {p} pipeline.')
+         pack = torch.load(f, weights_only=True)
+         self.voices[voice] = pack
+         return pack
+@@ -441,6 +459,9 @@
+                         continue
+                         
+                     ps, _ = self.g2p(chunk)
++                    # Kokoro's symbol table has y, not the short-ü ʏ espeak emits.
++                    if self.lang_code == 'd' and ps:
++                        ps = ps.replace('ʏ', 'y')
+                     if not ps:
+                         continue
+                     elif len(ps) > 510:
+diff -Naur pristine/kokoro/pyproject.toml src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -16,11 +16,11 @@
+     "License :: OSI Approved :: Apache Software License",
+     "Operating System :: OS Independent"
+ ]
+-requires-python = ">=3.10, <3.14"
++requires-python = ">=3.10"
+ dependencies = [
+     "huggingface_hub",
+     "loguru",
+-    "misaki[en]>=0.9.4",
++    "misaki>=0.9.4",
+     "numpy",
+     "torch",
+     "transformers"
