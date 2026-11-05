@@ -33,7 +33,7 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
  
  languages = [
      "a",  # American English
-@@ -33,60 +25,126 @@
+@@ -33,60 +25,113 @@
      "z",  # Mandarin Chinese
  ]
  
@@ -70,19 +70,6 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 -                continue
 -            audio_bytes = (result.audio.numpy() * 32767).astype(np.int16).tobytes()
 -            wav_file.writeframes(audio_bytes)
-+VOICE_PACKAGES = {
-+    "a": "kokoro-voices-en",
-+    "b": "kokoro-voices-en",
-+    "d": "kokoro-voice-thorsten",
-+    "e": "kokoro-voices-es",
-+    "f": "kokoro-voices-fr",
-+    "h": "kokoro-voices-hi",
-+    "i": "kokoro-voices-it",
-+    "j": "kokoro-voices-ja",
-+    "p": "kokoro-voices-pt",
-+    "z": "kokoro-voices-zh",
-+}
-+
 +MODEL_PACKAGES = {
 +    "kokoro-v1_0": "kokoro-model",
 +    "kokoro-v1_1-zh": "kokoro-model",
@@ -125,7 +112,7 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 +    rows = installed_voices()
 +    if not rows:
 +        print(f"No voices installed under {SHARE / 'voices'}", file=sys.stderr)
-+        print("Install kokoro-voices or kokoro-voice-thorsten.", file=sys.stderr)
++        print("Install a kokoro-voice-* package.", file=sys.stderr)
 +        raise SystemExit(1)
 +    for name, language, model in rows:
 +        print(f"{name}\tlanguage={language}\tmodel={model}")
@@ -147,7 +134,7 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 +    if path.is_file():
 +        return path
 +    stem = Path(name).stem
-+    package = "kokoro-voice-thorsten" if stem == "thorsten" else VOICE_PACKAGES.get(stem[:1], "kokoro-voices")
++    package = f"kokoro-voice-{stem}"
 +    installed = ", ".join(row[0] for row in installed_voices()) or "(none)"
 +    raise SystemExit(
 +        f"Voice {name!r} is not installed ({path}).\n"
@@ -199,7 +186,7 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
      )
      parser.add_argument(
          "-i",
-@@ -95,54 +153,71 @@
+@@ -95,54 +140,71 @@
          type=Path,
          help="Path to input text file (default: stdin)",
      )

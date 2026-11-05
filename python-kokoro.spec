@@ -17,14 +17,15 @@ BuildRequires:	pkgconfig(python)
 BuildRequires:	python%{pyver}dist(hatchling)
 BuildRequires:	python%{pyver}dist(pip)
 BuildRequires:	python%{pyver}dist(wheel)
+Recommends:	kokoro-voice
 
 %description
 Kokoro speech synthesis. This package is the engine and the kokoro
 command. Checkpoints and voices are separate packages.
 
-The official voices share the checkpoint in kokoro-model and are split
-by language in kokoro-voices. The German Thorsten voice is the separate
-fine-tune kokoro-voice-thorsten, with its own checkpoint.
+Official voices are packaged one per voice, as kokoro-voice-<name>,
+and share the checkpoint in kokoro-model. The German Thorsten voice is
+kokoro-voice-thorsten, with its own checkpoint.
 
 Voices are read from /usr/share/kokoro, or from the directory named by
 KOKORO_SHARE. A voice that is not installed is not downloaded.
