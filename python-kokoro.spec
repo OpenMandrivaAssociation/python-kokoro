@@ -2,7 +2,7 @@
 
 Name:		python-kokoro
 Version:	0.9.4
-Release:	1
+Release:	2
 Summary:	Kokoro text-to-speech engine
 License:	Apache-2.0
 Group:		Development/Python
@@ -29,6 +29,18 @@ kokoro-voice-thorsten, with its own checkpoint.
 
 Voices are read from /usr/share/kokoro, or from the directory named by
 KOKORO_SHARE. A voice that is not installed is not downloaded.
+
+One text can mix voices, languages, and raw phonemes. A voice tag
+selects another style pack. Packs that share a checkpoint stay on
+that model; Thorsten is a separate checkpoint, and a span in that
+voice uses it. A language tag selects spelling rules and keeps the
+voice, so an English title can sit inside a German sentence. Phonemes
+outside the active checkpoint's alphabet are replaced with a close
+match, or dropped. A pitch tag holds a note. note="A4" is the
+equal-tempered name (A4 is 440; with no number the note is in octave
+4). freq="..." is hertz and can sit between the notes. Words tagged
+one after another stay one line, for example <pitch note="A4">I</pitch>
+<pitch note="C5">like</pitch><pitch note="F4">dogs</pitch>.
 
 %files
 %doc README.md

@@ -1,7 +1,15 @@
-diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/__main__.py
---- a/kokoro/__main__.py
-+++ b/kokoro/__main__.py
-@@ -1,24 +1,16 @@
+diff -Naur a/kokoro/__init__.py b/kokoro/__init__.py
+--- a/kokoro/__init__.py	2026-04-17 15:25:57.000000000 +0200
++++ b/kokoro/__init__.py	2026-11-06 17:55:53.645827114 +0100
+@@ -21,3 +21,4 @@
+ 
+ from .model import KModel
+ from .pipeline import KPipeline
++from .speak import speak
+diff -Naur a/kokoro/__main__.py b/kokoro/__main__.py
+--- a/kokoro/__main__.py	2026-04-17 15:25:57.000000000 +0200
++++ b/kokoro/__main__.py	2026-11-06 17:57:31.897415360 +0100
+@@ -1,149 +1,165 @@
 -"""Kokoro TTS CLI
 -Example usage:
 -python3 -m kokoro --text "The sky above the port was the color of television, tuned to a dead channel." -o file.wav --debug
@@ -18,31 +26,57 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 +kokoro -m af_heart -o hello.wav
 +kokoro -m thorsten -o hallo.wav
 +kokoro --list-voices
++
++One text can mix voices, languages, and raw phonemes. -m and -l are the
++defaults outside the tags:
++
++  <voice name="am_adam">character line</voice>
++  <lang code="en">Star Trek</lang>
++  <phoneme ph="stˈɑɹ tɹˈɛk">Star Trek</phoneme>
++  <pitch note="A4">I</pitch><pitch note="C5">like</pitch><pitch note="F4">dogs</pitch>
++  <pitch freq="450">I</pitch>
++
++A voice is a style pack. Narrator and character voices that share a
++checkpoint are two packs on that model. A language tag keeps the voice
++and uses that language's spelling rules, so German "Star" (the bird,
++"shtar") and English "Star Trek" can share a sentence. Thorsten is its
++own checkpoint: a span in that voice uses the Thorsten model.
++
++Symbols outside the active checkpoint's alphabet are replaced with a
++close match or dropped. \\< writes a literal <.
++
++A pitch tag holds a note for the words inside it. note="A4" is equal
++temperament (A4 is 440; with no number the note is in octave 4, so A
++is A4 and C is middle C). freq is hertz and can sit between the notes.
++Tagged words keep the current voice and language and stay one line.
  """
  
  import argparse
-+import json
-+import os
 +import sys
  import wave
  from pathlib import Path
 -from typing import Generator, TYPE_CHECKING
--
+ 
 -import numpy as np
 -from loguru import logger
- 
- languages = [
-     "a",  # American English
-@@ -33,60 +25,113 @@
-     "z",  # Mandarin Chinese
- ]
- 
+-
+-languages = [
+-    "a",  # American English
+-    "b",  # British English
+-    "d",  # German
+-    "h",  # Hindi
+-    "e",  # Spanish
+-    "f",  # French
+-    "i",  # Italian
+-    "p",  # Brazilian Portuguese
+-    "j",  # Japanese
+-    "z",  # Mandarin Chinese
+-]
+-
 -if TYPE_CHECKING:
 -    from kokoro import KPipeline
 -
-+SHARE = Path(os.environ.get("KOKORO_SHARE", "/usr/share/kokoro"))
-+DEFAULT_MODEL = "kokoro-v1_0"
- 
+-
 -def generate_audio(
 -    text: str, kokoro_language: str, voice: str, speed=1
 -) -> Generator["KPipeline.Result", None, None]:
@@ -66,130 +100,95 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 -            text, kokoro_language=kokoro_language, voice=voice, speed=speed
 -        ):
 -            logger.debug(result.phonemes)
--            if result.audio is None:
--                continue
--            audio_bytes = (result.audio.numpy() * 32767).astype(np.int16).tobytes()
--            wav_file.writeframes(audio_bytes)
-+MODEL_PACKAGES = {
-+    "kokoro-v1_0": "kokoro-model",
-+    "kokoro-v1_1-zh": "kokoro-model",
-+    "thorsten": "kokoro-voice-thorsten",
-+}
++from kokoro.assets import (
++    LANGUAGES,
++    installed_voices,
++    normalize_lang,
++    require_voice,
++    share_dir,
++    voice_meta,
++)
++from kokoro.speak import iter_audio, open_models, prepare_speech
 +
 +
-+def voice_file(name: str) -> Path:
-+    path = Path(name)
-+    if path.suffix == ".pt" or path.is_file():
-+        return path
-+    return SHARE / "voices" / f"{name}.pt"
-+
-+
-+def voice_meta(path: Path) -> dict:
-+    meta_path = path.with_suffix(".json")
-+    if not meta_path.is_file():
-+        return {}
-+    with meta_path.open(encoding="utf-8") as handle:
-+        data = json.load(handle)
-+    if not isinstance(data, dict):
-+        raise SystemExit(f"{meta_path} is not a JSON object")
-+    return data
-+
-+
-+def installed_voices():
-+    directory = SHARE / "voices"
-+    if not directory.is_dir():
-+        return []
-+    rows = []
-+    for path in sorted(directory.glob("*.pt")):
-+        meta = voice_meta(path)
-+        language = meta.get("language") or (path.stem[:1])
-+        model = meta.get("model") or DEFAULT_MODEL
-+        rows.append((path.stem, str(language), str(model)))
-+    return rows
-+
-+
-+def list_voices() -> None:
++def list_voices():
 +    rows = installed_voices()
 +    if not rows:
-+        print(f"No voices installed under {SHARE / 'voices'}", file=sys.stderr)
-+        print("Install a kokoro-voice-* package.", file=sys.stderr)
++        print(f'No voices installed under {share_dir() / "voices"}', file=sys.stderr)
++        print('Install a kokoro-voice-* package.', file=sys.stderr)
 +        raise SystemExit(1)
 +    for name, language, model in rows:
-+        print(f"{name}\tlanguage={language}\tmodel={model}")
++        print(f'{name}\tlanguage={language}\tmodel={model}')
 +
 +
-+def model_files(model_name: str):
-+    directory = SHARE / "models" / model_name
-+    config = directory / "config.json"
-+    weights = None
-+    for candidate in (directory / f"{model_name}.pth", directory / "model.pth"):
-+        if candidate.is_file():
-+            weights = candidate
-+            break
-+    return config, weights
++def write_wav(path, results, debug):
++    import numpy as np
++    from loguru import logger
 +
-+
-+def require_voice(name: str) -> Path:
-+    path = voice_file(name)
-+    if path.is_file():
-+        return path
-+    stem = Path(name).stem
-+    package = f"kokoro-voice-{stem}"
-+    installed = ", ".join(row[0] for row in installed_voices()) or "(none)"
-+    raise SystemExit(
-+        f"Voice {name!r} is not installed ({path}).\n"
-+        f"Install {package}.\n"
-+        f"Installed voices: {installed}"
-+    )
-+
-+
-+def require_model(model_name: str):
-+    config, weights = model_files(model_name)
-+    if config.is_file() and weights is not None:
-+        return config, weights
-+    package = MODEL_PACKAGES.get(model_name, "kokoro-model")
-+    raise SystemExit(
-+        f"Kokoro model {model_name!r} is not installed under {SHARE / 'models' / model_name}.\n"
-+        f"Install {package}."
-+    )
++    out_file = Path(path)
++    if out_file.suffix != '.wav':
++        print('The output file name should end with .wav', file=sys.stderr)
++    with wave.open(str(out_file.resolve()), 'wb') as wav_file:
++        wav_file.setnchannels(1)
++        wav_file.setsampwidth(2)
++        wav_file.setframerate(24000)
++        for result in results:
++            if debug:
++                logger.debug(result.phonemes)
+             if result.audio is None:
+                 continue
+-            audio_bytes = (result.audio.numpy() * 32767).astype(np.int16).tobytes()
+-            wav_file.writeframes(audio_bytes)
++            audio = result.audio.numpy() if hasattr(result.audio, 'numpy') else result.audio
++            wav_file.writeframes((audio * 32767).astype(np.int16).tobytes())
  
  
- def main() -> None:
+-def main() -> None:
 -    parser = argparse.ArgumentParser()
 -    parser.add_argument(
 -        "-m",
 -        "--voice",
 -        default="af_heart",
 -        help="Voice to use",
--    )
-+    parser = argparse.ArgumentParser(prog="kokoro")
-+    parser.add_argument("-m", "--voice", default="af_heart", help="Voice name or .pt path")
++def main():
++    parser = argparse.ArgumentParser(
++        prog='kokoro',
++        formatter_class=argparse.RawDescriptionHelpFormatter,
++        description=__doc__,
+     )
++    parser.add_argument('-m', '--voice', default='af_heart', help='Voice name or .pt path')
      parser.add_argument(
-         "-l",
-         "--language",
+-        "-l",
+-        "--language",
 -        help="Language to use (defaults to the one corresponding to the voice)",
-         choices=languages,
-+        help="Language code. Default is the voice metadata, or the first letter of the voice name",
-+    )
-+    parser.add_argument(
-+        "--model",
-+        help="Model directory name under /usr/share/kokoro/models. Default is the voice metadata, or kokoro-v1_0",
+-        choices=languages,
++        '-l',
++        '--language',
++        help='Language code. Default is the voice metadata, or the first letter of the voice name. '
++        f"One of: {' '.join(LANGUAGES)}. Also en, en-us, en-gb, de, es, fr, hi, it, pt, ja, zh",
      )
-+    parser.add_argument("--list-voices", action="store_true", help="List installed voices and exit")
      parser.add_argument(
-         "-o",
-         "--output-file",
-         "--output_file",
-         type=Path,
-         help="Path to output WAV file",
+-        "-o",
+-        "--output-file",
+-        "--output_file",
+-        type=Path,
+-        help="Path to output WAV file",
 -        required=True,
++        '--model',
++        help='Checkpoint for the -m voice. Default is that voice\'s metadata, or kokoro-v1_0. '
++        'Other voices in the text keep their own checkpoint',
      )
++    parser.add_argument('--list-voices', action='store_true', help='List installed voices and exit')
      parser.add_argument(
-         "-i",
-@@ -95,54 +140,71 @@
+-        "-i",
+-        "--input-file",
+-        "--input_file",
++        '-o',
++        '--output-file',
++        '--output_file',
          type=Path,
-         help="Path to input text file (default: stdin)",
-     )
+-        help="Path to input text file (default: stdin)",
+-    )
 -    parser.add_argument(
 -        "-t",
 -        "--text",
@@ -201,15 +200,21 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 -        type=float,
 -        default=1.0,
 -        help="Speech speed",
--    )
--    parser.add_argument(
++        help='Path to output WAV file',
+     )
+     parser.add_argument(
 -        "--debug",
 -        action="store_true",
 -        help="Print DEBUG messages to console",
--    )
-+    parser.add_argument("-t", "--text", help="Text to use instead of reading from stdin")
-+    parser.add_argument("-s", "--speed", type=float, default=1.0, help="Speech speed")
-+    parser.add_argument("--debug", action="store_true", help="Print DEBUG messages to console")
++        '-i',
++        '--input-file',
++        '--input_file',
++        type=Path,
++        help='Path to input text file (default: stdin)',
+     )
++    parser.add_argument('-t', '--text', help='Text to use instead of reading from stdin')
++    parser.add_argument('-s', '--speed', type=float, default=1.0, help='Speech speed')
++    parser.add_argument('--debug', action='store_true', help='Print DEBUG messages to console')
      args = parser.parse_args()
 -    if args.debug:
 -        logger.level("DEBUG")
@@ -220,18 +225,14 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 +        list_voices()
 +        return
 +    if args.output_file is None:
-+        raise SystemExit("An output file is required (-o FILE.wav).")
++        raise SystemExit('An output file is required (-o FILE.wav).')
 +
-+    voice = require_voice(args.voice)
-+    meta = voice_meta(voice)
-+    lang = args.language or meta.get("language") or voice.stem[:1]
-+    if lang not in languages:
-+        raise SystemExit(
-+            f"Cannot tell which language {args.voice!r} uses. "
-+            f"Pass -l with one of: {' '.join(languages)}"
-+        )
-+    model_name = args.model or meta.get("model") or DEFAULT_MODEL
-+    config, weights = require_model(model_name)
++    voice_path = require_voice(args.voice)
++    meta = voice_meta(voice_path)
++    if args.language:
++        lang = normalize_lang(args.language)
++    else:
++        lang = normalize_lang(meta.get('language') or voice_path.stem[:1])
  
      if args.text is not None and args.input_file is not None:
 -        raise Exception("You cannot specify both 'text' and 'input_file'")
@@ -243,71 +244,344 @@ diff -Naur pristine/kokoro/kokoro/__main__.py src/kokoro-b96fef95e6a746495f92443
 -        file: Path = args.input_file
 -        text = file.read_text()
 +    elif args.input_file is not None:
-+        text = args.input_file.read_text(encoding="utf-8")
++        text = args.input_file.read_text(encoding='utf-8')
      else:
 -        import sys
 -        print("Press Ctrl+D to stop reading input and start generating", flush=True)
 -        text = '\n'.join(sys.stdin)
-+        if sys.stdin.isatty():
-+            print("Press Ctrl+D to stop reading input and start generating", flush=True)
-+        text = sys.stdin.read()
-+
-+    import numpy as np
-+    import torch
-+    from loguru import logger
-+    from kokoro import KModel, KPipeline
- 
+-
 -    logger.debug(f"Input text: {text!r}")
-+    if args.debug:
-+        logger.level("DEBUG")
-+    if not meta.get("language") and not voice.stem.startswith(lang):
-+        logger.warning(f"Voice {voice.stem} is not made for language {lang}")
-+
-+    device = "cuda" if torch.cuda.is_available() else "cpu"
-+    kmodel = KModel(
-+        repo_id="hexgrad/Kokoro-82M",
-+        config=str(config),
-+        model=str(weights),
-+    ).to(device).eval()
-+    pipeline = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=kmodel)
++        if sys.stdin.isatty():
++            print('Press Ctrl+D to stop reading input and start generating', flush=True)
++        text = sys.stdin.read()
  
-     out_file: Path = args.output_file
+-    out_file: Path = args.output_file
 -    if not out_file.suffix == ".wav":
-+    if out_file.suffix != ".wav":
-         logger.warning("The output file name should end with .wav")
+-        logger.warning("The output file name should end with .wav")
 -    generate_and_save_audio(
 -        output_file=out_file,
 -        text=text,
 -        kokoro_language=lang,
 -        voice=args.voice,
 -        speed=args.speed,
--    )
-+    with wave.open(str(out_file.resolve()), "wb") as wav_file:
-+        wav_file.setnchannels(1)
-+        wav_file.setsampwidth(2)
-+        wav_file.setframerate(24000)
-+        for result in pipeline(text, voice=str(voice), speed=args.speed, split_pattern=r"\n+"):
-+            if args.debug:
-+                logger.debug(result.phonemes)
-+            if result.audio is None:
-+                continue
-+            audio = result.audio.numpy() if hasattr(result.audio, "numpy") else result.audio
-+            wav_file.writeframes((audio * 32767).astype(np.int16).tobytes())
++    from loguru import logger
++    if args.debug:
++        logger.enable('kokoro')
++        logger.remove()
++        logger.add(
++            sys.stderr,
++            format='{message}',
++            level='DEBUG',
++            colorize=False,
++        )
++    if not meta.get('language') and not voice_path.stem.startswith(lang):
++        print(
++            f'Voice {voice_path.stem} is not made for language {lang}',
++            file=sys.stderr,
++        )
++
++    utterances = prepare_speech(text, voice=args.voice, lang=lang, model=args.model)
++    models = open_models(utterances)
++    write_wav(
++        args.output_file,
++        iter_audio(utterances, models, speed=args.speed),
++        debug=args.debug,
+     )
  
  
- if __name__ == "__main__":
-diff -Naur pristine/kokoro/kokoro/model.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/model.py
---- a/kokoro/model.py
-+++ b/kokoro/model.py
-@@ -6,6 +6,7 @@
+-if __name__ == "__main__":
++if __name__ == '__main__':
+     main()
+diff -Naur a/kokoro/assets.py b/kokoro/assets.py
+--- a/kokoro/assets.py	1970-01-01 01:00:00.000000000 +0100
++++ b/kokoro/assets.py	2026-11-06 17:55:53.645982927 +0100
+@@ -0,0 +1,140 @@
++"""Local Kokoro voices and checkpoints under /usr/share/kokoro.
++
++Nothing is downloaded. A missing voice or checkpoint is an error that
++names the package which provides it.
++"""
++
++import json
++import os
++from pathlib import Path
++
++LANGUAGES = (
++    'a',  # American English
++    'b',  # British English
++    'd',  # German
++    'h',  # Hindi
++    'e',  # Spanish
++    'f',  # French
++    'i',  # Italian
++    'p',  # Brazilian Portuguese
++    'j',  # Japanese
++    'z',  # Mandarin Chinese
++)
++
++# Short names and locale tags accepted by -l and by <lang code="...">.
++# Single-letter codes match KPipeline.
++LANG_ALIASES = {
++    'en': 'a',
++    'en-us': 'a',
++    'en-gb': 'b',
++    'de': 'd',
++    'de-de': 'd',
++    'es': 'e',
++    'es-es': 'e',
++    'fr': 'f',
++    'fr-fr': 'f',
++    'hi': 'h',
++    'it': 'i',
++    'pt': 'p',
++    'pt-br': 'p',
++    'ja': 'j',
++    'zh': 'z',
++    'cmn': 'z',
++}
++
++DEFAULT_MODEL = 'kokoro-v1_0'
++
++MODEL_PACKAGES = {
++    'kokoro-v1_0': 'kokoro-model',
++    'kokoro-v1_1-zh': 'kokoro-model',
++    'thorsten': 'kokoro-voice-thorsten',
++}
++
++
++def share_dir():
++    return Path(os.environ.get('KOKORO_SHARE', '/usr/share/kokoro'))
++
++
++def normalize_lang(code):
++    """Return the single-letter language code, or exit if it is unknown."""
++    if code is None or str(code).strip() == '':
++        raise SystemExit(
++            'Missing language code. '
++            f"Use one of: {' '.join(LANGUAGES)}"
++        )
++    key = str(code).strip().lower().replace('_', '-')
++    key = LANG_ALIASES.get(key, key)
++    if key not in LANGUAGES:
++        raise SystemExit(
++            f"Unknown language {code!r}. "
++            f"Use one of: {' '.join(LANGUAGES)} "
++            '(or en, en-us, en-gb, de, es, fr, hi, it, pt, ja, zh).'
++        )
++    return key
++
++
++def voice_file(name):
++    path = Path(name)
++    if path.suffix == '.pt' or path.is_file():
++        return path
++    return share_dir() / 'voices' / f'{name}.pt'
++
++
++def voice_meta(path):
++    meta_path = Path(path).with_suffix('.json')
++    if not meta_path.is_file():
++        return {}
++    with meta_path.open(encoding='utf-8') as handle:
++        data = json.load(handle)
++    if not isinstance(data, dict):
++        raise SystemExit(f'{meta_path} is not a JSON object')
++    return data
++
++
++def installed_voices():
++    directory = share_dir() / 'voices'
++    if not directory.is_dir():
++        return []
++    rows = []
++    for path in sorted(directory.glob('*.pt')):
++        meta = voice_meta(path)
++        language = meta.get('language') or path.stem[:1]
++        model = meta.get('model') or DEFAULT_MODEL
++        rows.append((path.stem, str(language), str(model)))
++    return rows
++
++
++def model_files(model_name):
++    directory = share_dir() / 'models' / model_name
++    config = directory / 'config.json'
++    weights = None
++    for candidate in (directory / f'{model_name}.pth', directory / 'model.pth'):
++        if candidate.is_file():
++            weights = candidate
++            break
++    return config, weights
++
++
++def require_voice(name):
++    path = voice_file(name)
++    if path.is_file():
++        return path
++    stem = Path(name).stem
++    package = f'kokoro-voice-{stem}'
++    installed = ', '.join(row[0] for row in installed_voices()) or '(none)'
++    raise SystemExit(
++        f"Voice {name!r} is not installed ({path}).\n"
++        f'Install {package}.\n'
++        f'Installed voices: {installed}'
++    )
++
++
++def require_model(model_name):
++    config, weights = model_files(model_name)
++    if config.is_file() and weights is not None:
++        return config, weights
++    package = MODEL_PACKAGES.get(model_name, 'kokoro-model')
++    raise SystemExit(
++        f"Kokoro model {model_name!r} is not installed under {share_dir() / 'models' / model_name}.\n"
++        f'Install {package}.'
++    )
+diff -Naur a/kokoro/model.py b/kokoro/model.py
+--- a/kokoro/model.py	2026-04-17 15:25:57.000000000 +0200
++++ b/kokoro/model.py	2026-11-06 17:55:53.646076239 +0100
+@@ -1,13 +1,141 @@
+ from .istftnet import Decoder
+ from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
++from .phonemes import PITCH_GLIDE, fit_pitched
++from .pitch import psola
+ from dataclasses import dataclass
+ from huggingface_hub import hf_hub_download
+ from loguru import logger
  from transformers import AlbertConfig
  from typing import Dict, Optional, Union
  import json
++import math
 +import os
++import numpy as np
  import torch
  
++# istftnet.SourceModuleHnNSF uses voiced_threshod=10: an F0 at or below
++# this is unvoiced noise, not a sine. Kokoro's curve is in hertz.
++_UNVOICED_HZ = 10.0
++
++
++def _pitch_hz(value):
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        return None
++    value = float(value)
++    if not math.isfinite(value) or value <= 0:
++        return None
++    return value
++
++
++def impose_pitch(f0, pred_dur, pitches, unvoiced_hz=_UNVOICED_HZ):
++    """Replace voiced F0 frames with the requested notes.
++
++    ``pitches`` lines up with the phoneme characters. ``pred_dur`` is one
++    longer on each side (start and end padding). The F0 curve has two
++    frames per duration step: the prosody predictor upsamples once by 2.
++    Padding and any frame the model left unvoiced keep the prediction, so
++    a rest does not turn into a buzz. A glide marker interpolates, in
++    log frequency, between the notes on either side.
++    """
++    if not pitches:
++        return f0
++    durs = [int(item) for item in pred_dur.detach().reshape(-1).tolist()]
++    if len(durs) != len(pitches) + 2:
++        logger.debug(f'pitch ignored: {len(durs)} durations for {len(pitches)} symbols')
++        return f0
++    total = sum(durs)
++    flat = f0.detach().reshape(-1)
++    if flat.numel() != 2 * total:
++        logger.debug(f'pitch ignored: F0 length {flat.numel()} is not {2 * total}')
++        return f0
++    original = flat.tolist()
++    marks = [None] * len(durs)
++    for index, value in enumerate(pitches):
++        hz = _pitch_hz(value)
++        if hz is not None:
++            marks[index + 1] = hz
++        elif value == PITCH_GLIDE:
++            marks[index + 1] = PITCH_GLIDE
++    desired = [None] * (2 * total)
++    cursor = 0
++    spans = []
++    for mark, dur in zip(marks, durs):
++        width = 2 * dur
++        spans.append((cursor, cursor + width))
++        if isinstance(mark, float):
++            for frame in range(cursor, cursor + width):
++                if original[frame] > unvoiced_hz:
++                    desired[frame] = mark
++        cursor += width
++
++    def neighbor(index, step):
++        cursor_index = index + step
++        while 0 <= cursor_index < len(marks):
++            mark = marks[cursor_index]
++            if isinstance(mark, float):
++                return mark
++            if mark != PITCH_GLIDE:
++                return None
++            cursor_index += step
++        return None
++
++    for index, mark in enumerate(marks):
++        if mark != PITCH_GLIDE:
++            continue
++        left = neighbor(index, -1)
++        right = neighbor(index, 1)
++        if left is None or right is None or left <= 0 or right <= 0:
++            continue
++        start, end = spans[index]
++        span = end - start
++        if span <= 0:
++            continue
++        for offset, frame in enumerate(range(start, end)):
++            if original[frame] <= unvoiced_hz:
++                continue
++            if left == right:
++                desired[frame] = left
++                continue
++            frac = (offset + 1) / (span + 1)
++            desired[frame] = math.exp(math.log(left) * (1.0 - frac) + math.log(right) * frac)
++
++    if all(item is None for item in desired):
++        return f0
++    out = f0.clone()
++    view = out.reshape(-1)
++    for frame, hz in enumerate(desired):
++        if hz is not None:
++            view[frame] = hz
++    return out
++
++
++def sing(audio, f0, pred_dur, pitches):
++    """Move ``audio`` onto the notes in ``pitches``.
++
++    ``f0`` is the speaking contour the decoder just used. Frames that
++    :func:`impose_pitch` would replace are resynthesized at that note.
++    Everything else, including the start and end padding, is left as spoken.
++    """
++    target = impose_pitch(f0, pred_dur, pitches)
++    if target is f0:
++        return audio
++    source = f0.detach().reshape(-1).float()
++    desired = target.detach().reshape(-1).float()
++    if source.shape != desired.shape:
++        return audio
++    mask = (desired - source).abs() > 1.0
++    if not bool(mask.any()):
++        return audio
++    shifted = psola(
++        audio.detach().reshape(-1).float().cpu().numpy(),
++        source.cpu().numpy(),
++        desired.cpu().numpy(),
++        mask.cpu().numpy(),
++    )
++    out = torch.from_numpy(np.ascontiguousarray(shifted, dtype=np.float32))
++    out = out.to(device=audio.device, dtype=audio.dtype).clone()
++    return out.reshape(audio.shape)
++
  class KModel(torch.nn.Module):
-@@ -40,6 +41,28 @@
+     '''
+     KModel is a torch.nn.Module with 2 main responsibilities:
+@@ -40,6 +168,28 @@
              repo_id = 'hexgrad/Kokoro-82M'
              print(f"WARNING: Defaulting repo_id to {repo_id}. Pass repo_id='{repo_id}' to suppress this warning.")
          self.repo_id = repo_id
@@ -336,10 +610,198 @@ diff -Naur pristine/kokoro/kokoro/model.py src/kokoro-b96fef95e6a746495f92443fac
          if not isinstance(config, dict):
              if not config:
                  logger.debug("No config provided, downloading from HF")
-diff -Naur pristine/kokoro/kokoro/pipeline.py src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/kokoro/pipeline.py
---- a/kokoro/pipeline.py
-+++ b/kokoro/pipeline.py
-@@ -4,6 +4,7 @@
+@@ -88,7 +238,8 @@
+         self,
+         input_ids: torch.LongTensor,
+         ref_s: torch.FloatTensor,
+-        speed: float = 1
++        speed: float = 1,
++        pitches=None,
+     ) -> tuple[torch.FloatTensor, torch.LongTensor]:
+         input_lengths = torch.full(
+             (input_ids.shape[0],), 
+@@ -116,6 +267,8 @@
+         t_en = self.text_encoder(input_ids, input_lengths, text_mask)
+         asr = t_en @ pred_aln_trg
+         audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128]).squeeze()
++        if pitches:
++            audio = sing(audio, F0_pred, pred_dur, pitches)
+         return audio, pred_dur
+ 
+     def forward(
+@@ -123,14 +276,20 @@
+         phonemes: str,
+         ref_s: torch.FloatTensor,
+         speed: float = 1,
+-        return_output: bool = False
++        return_output: bool = False,
++        pitches=None,
+     ) -> Union['KModel.Output', torch.FloatTensor]:
++        phonemes, pitches = fit_pitched(phonemes, pitches, self.vocab)
+         input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
++        if pitches is not None and len(pitches) != len(input_ids):
++            pitches = None
+         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
++        if pitches:
++            logger.debug(f"pitch: {pitches}")
+         assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
+         input_ids = torch.LongTensor([[0, *input_ids, 0]]).to(self.device)
+         ref_s = ref_s.to(self.device)
+-        audio, pred_dur = self.forward_with_tokens(input_ids, ref_s, speed)
++        audio, pred_dur = self.forward_with_tokens(input_ids, ref_s, speed, pitches)
+         audio = audio.squeeze().cpu()
+         pred_dur = pred_dur.cpu() if pred_dur is not None else None
+         logger.debug(f"pred_dur: {pred_dur}")
+diff -Naur a/kokoro/phonemes.py b/kokoro/phonemes.py
+--- a/kokoro/phonemes.py	1970-01-01 01:00:00.000000000 +0100
++++ b/kokoro/phonemes.py	2026-11-06 17:55:53.646138961 +0100
+@@ -0,0 +1,138 @@
++"""Fit a phoneme string to one Kokoro checkpoint's alphabet.
++
++Kokoro does not speak general IPA. Each checkpoint has its own symbol
++table (``config.json`` vocab). A symbol that is not in that table is
++replaced with a close match when we have one, otherwise it is dropped.
++Nothing is logged: a missing symbol is not a hard error.
++"""
++
++import unicodedata
++
++# Replacements are the symbols Kokoro was trained with. Checked only after
++# the original character misses the active vocab, so a checkpoint that
++# actually has ʏ keeps ʏ.
++_CLOSE = {
++    'ʏ': 'y',   # espeak short-ü; Kokoro has y, not ʏ
++    'g': 'ɡ',   # ASCII g vs Latin script g U+0261
++    'ɢ': 'ɡ',
++    'ʀ': 'ʁ',
++    'ɝ': 'ɚ',
++    'ä': 'ɛ',
++    'ö': 'ø',
++    'ü': 'y',
++    'ë': 'ə',
++    'ï': 'i',
++    'ÿ': 'y',
++    'ʉ': 'u',
++    'ɵ': 'ø',
++    'ɘ': 'ə',
++    'ɞ': 'ɜ',
++    'ɶ': 'œ',
++    'ʍ': 'w',
++    'ɫ': 'l',
++    'ɱ': 'm',
++    'ʑ': 'ʒ',
++    'ɧ': 'ʃ',
++    'ɦ': 'h',
++    'ħ': 'h',
++    'ʕ': 'ʔ',
++    'ˑ': 'ː',
++    'ʷ': 'w',
++    'ʱ': 'ʰ',
++    "'": 'ˈ',
++}
++
++# Combining marks that are not themselves in the vocab.
++# pre: emit the Kokoro symbol before the base; post: after it.
++_MARKS = {
++    '\u0301': ('ˈ', 'pre'),   # acute ~ primary stress
++    '\u0300': ('ˌ', 'pre'),   # grave ~ secondary stress
++    '\u0304': ('ː', 'post'),  # macron ~ length
++    '\u0329': ('ᵊ', 'pre'),   # syllabic consonant
++}
++
++
++def _from_table(ch, vocab):
++    replacement = _CLOSE.get(ch)
++    if not replacement:
++        return ''
++    return ''.join(part for part in replacement if part in vocab)
++
++
++def _from_marks(ch, vocab):
++    parts = unicodedata.normalize('NFD', ch)
++    if len(parts) <= 1:
++        return ''
++    base = _from_table(parts[0], vocab) if parts[0] not in vocab else parts[0]
++    if not base:
++        return ''
++    pre = []
++    post = []
++    for mark in parts[1:]:
++        if mark in vocab:
++            post.append(mark)
++            continue
++        spec = _MARKS.get(mark)
++        if spec is None or spec[0] not in vocab:
++            continue
++        if spec[1] == 'pre':
++            pre.append(spec[0])
++        else:
++            post.append(spec[0])
++    return ''.join(pre) + base + ''.join(post)
++
++
++# Pitch maps are aligned to phoneme characters. None keeps the model's
++# own pitch. This marker, on a space between two notes, glides from one
++# frequency to the next instead of falling back to speech for that gap.
++PITCH_GLIDE = 'glide'
++
++
++def fit_pitched(phonemes, pitches, vocab):
++    """Fit ``phonemes`` and keep a pitch value on every surviving symbol.
++
++    ``pitches`` is one value per character: a frequency in hertz, None, or
++    :data:`PITCH_GLIDE`. A character that becomes several symbols copies
++    its value. A dropped character drops its value. ``pitches`` of None,
++    or a map that does not line up, fits the text and returns no map.
++    """
++    if not pitches or len(pitches) != len(phonemes or ''):
++        return fit_phonemes(phonemes, vocab), None
++    chars = []
++    kept = []
++    for ch, freq in zip(phonemes, pitches):
++        fitted = fit_phonemes(ch, vocab)
++        if not fitted:
++            continue
++        chars.append(fitted)
++        kept.extend([freq] * len(fitted))
++    return ''.join(chars), kept
++
++
++def fit_phonemes(phonemes, vocab):
++    """Return ``phonemes`` using only symbols in ``vocab``.
++
++    ``vocab`` is the checkpoint's symbol-to-id map. Known symbols pass
++    through. A precomposed character whose decomposed pieces are all known
++    (for example ã) is decomposed. Anything else is a close match from the
++    table above, or it is dropped.
++    """
++    if not phonemes or not vocab:
++        return ''
++    out = []
++    for ch in phonemes:
++        if ch in vocab:
++            out.append(ch)
++            continue
++        decomposed = unicodedata.normalize('NFD', ch)
++        if decomposed != ch and all(part in vocab for part in decomposed):
++            out.append(decomposed)
++            continue
++        mapped = _from_table(ch, vocab)
++        if mapped:
++            out.append(mapped)
++            continue
++        mapped = _from_marks(ch, vocab)
++        if mapped:
++            out.append(mapped)
++    return ''.join(out)
+diff -Naur a/kokoro/pipeline.py b/kokoro/pipeline.py
+--- a/kokoro/pipeline.py	2026-04-17 15:25:57.000000000 +0200
++++ b/kokoro/pipeline.py	2026-11-06 17:55:53.646235823 +0100
+@@ -1,13 +1,30 @@
+ from .model import KModel
++from .phonemes import fit_phonemes, fit_pitched
+ from dataclasses import dataclass
+ from huggingface_hub import hf_hub_download
  from loguru import logger
  from misaki import en, espeak
  from typing import Callable, Generator, List, Optional, Tuple, Union
@@ -347,7 +809,26 @@ diff -Naur pristine/kokoro/kokoro/pipeline.py src/kokoro-b96fef95e6a746495f92443
  import re
  import torch
  import os
-@@ -155,14 +156,31 @@
+ 
++def _clip_phonemes(ps, model):
++    """Keep symbols the checkpoint can speak, then cap the length.
++
++    Unknown symbols are replaced with a close match or dropped. Callers
++    that still exceed the context window are truncated, same as before.
++    """
++    if not ps:
++        return ''
++    if model is not None:
++        ps = fit_phonemes(ps, model.vocab)
++    if len(ps) > 510:
++        logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
++        ps = ps[:510]
++    return ps
++
+ ALIASES = {
+     'en-us': 'a',
+     'en-gb': 'b',
+@@ -155,14 +172,31 @@
      def load_single_voice(self, voice: str):
          if voice in self.voices:
              return self.voices[voice]
@@ -385,19 +866,963 @@ diff -Naur pristine/kokoro/kokoro/pipeline.py src/kokoro-b96fef95e6a746495f92443
          pack = torch.load(f, weights_only=True)
          self.voices[voice] = pack
          return pack
-@@ -441,6 +459,9 @@
+@@ -244,18 +278,32 @@
+         model: KModel,
+         ps: str,
+         pack: torch.FloatTensor,
+-        speed: Union[float, Callable[[int], float]] = 1
+-    ) -> KModel.Output:
++        speed: Union[float, Callable[[int], float]] = 1,
++        pitches=None,
++    ) -> Optional[KModel.Output]:
++        # The style row is pack[len-1], so the length has to be the symbols
++        # the checkpoint will actually see.
++        if not ps:
++            return None
++        if model is not None:
++            ps, pitches = fit_pitched(ps, pitches, model.vocab)
++        if not ps:
++            return None
++        if len(ps) > 510:
++            ps = ps[:510]
++            if pitches is not None:
++                pitches = pitches[:510]
+         if callable(speed):
+             speed = speed(len(ps))
+-        return model(ps, pack[len(ps)-1], speed, return_output=True)
++        return model(ps, pack[len(ps)-1], speed, return_output=True, pitches=pitches)
+ 
+     def generate_from_tokens(
+         self,
+         tokens: Union[str, List[en.MToken]],
+         voice: str,
+         speed: float = 1,
+-        model: Optional[KModel] = None
++        model: Optional[KModel] = None,
++        pitches=None,
+     ) -> Generator['KPipeline.Result', None, None]:
+         """Generate audio from either raw phonemes or pre-processed tokens.
+         
+@@ -280,21 +328,22 @@
+         # Handle raw phoneme string
+         if isinstance(tokens, str):
+             logger.debug("Processing phonemes from raw string")
++            if model is not None:
++                tokens, pitches = fit_pitched(tokens, pitches, model.vocab)
++            if not tokens:
++                return
+             if len(tokens) > 510:
+                 raise ValueError(f'Phoneme string too long: {len(tokens)} > 510')
+-            output = KPipeline.infer(model, tokens, pack, speed) if model else None
++            output = KPipeline.infer(model, tokens, pack, speed, pitches) if model else None
+             yield self.Result(graphemes='', phonemes=tokens, output=output)
+             return
+         
+         logger.debug("Processing MTokens")
+         # Handle pre-processed tokens
+         for gs, ps, tks in self.en_tokenize(tokens):
++            ps = _clip_phonemes(ps, model)
+             if not ps:
+                 continue
+-            elif len(ps) > 510:
+-                logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+-                logger.warning("Truncating to 510 characters")
+-                ps = ps[:510]
+             output = KPipeline.infer(model, ps, pack, speed) if model else None
+             if output is not None and output.pred_dur is not None:
+                 KPipeline.join_timestamps(tks, output.pred_dur)
+@@ -394,11 +443,9 @@
+                 logger.debug(f"Processing English text: {graphemes[:50]}{'...' if len(graphemes) > 50 else ''}")
+                 _, tokens = self.g2p(graphemes)
+                 for gs, ps, tks in self.en_tokenize(tokens):
++                    ps = _clip_phonemes(ps, model)
+                     if not ps:
+                         continue
+-                    elif len(ps) > 510:
+-                        logger.warning(f"Unexpected len(ps) == {len(ps)} > 510 and ps == '{ps}'")
+-                        ps = ps[:510]
+                     output = KPipeline.infer(model, ps, pack, speed) if model else None
+                     if output is not None and output.pred_dur is not None:
+                         KPipeline.join_timestamps(tks, output.pred_dur)
+@@ -441,11 +488,9 @@
                          continue
                          
                      ps, _ = self.g2p(chunk)
-+                    # Kokoro's symbol table has y, not the short-ü ʏ espeak emits.
-+                    if self.lang_code == 'd' and ps:
-+                        ps = ps.replace('ʏ', 'y')
++                    ps = _clip_phonemes(ps, model)
                      if not ps:
                          continue
-                     elif len(ps) > 510:
-diff -Naur pristine/kokoro/pyproject.toml src/kokoro-b96fef95e6a746495f92443fac7c688f90fc57fc/pyproject.toml
---- a/pyproject.toml
-+++ b/pyproject.toml
+-                    elif len(ps) > 510:
+-                        logger.warning(f'Truncating len(ps) == {len(ps)} > 510')
+-                        ps = ps[:510]
+-                        
++
+                     output = KPipeline.infer(model, ps, pack, speed) if model else None
+                     yield self.Result(graphemes=chunk, phonemes=ps, output=output, text_index=graphemes_index)
+diff -Naur a/kokoro/pitch.py b/kokoro/pitch.py
+--- a/kokoro/pitch.py	1970-01-01 01:00:00.000000000 +0100
++++ b/kokoro/pitch.py	2026-11-06 17:55:53.646398066 +0100
+@@ -0,0 +1,127 @@
++"""Move a waveform onto requested note frequencies.
++
++Kokoro's decoder only follows its F0 curve inside a voice's speaking
++range. A sung note above that range has to be applied to the waveform.
++Pitch-synchronous overlap-add repeats the voice's own cycles at the new
++period, so the note changes and the formants stay.
++"""
++
++import numpy as np
++
++
++def _at_audio_rate(values, n_samples):
++    values = np.asarray(values)
++    if values.shape[0] == n_samples:
++        return values
++    frames = values.shape[0]
++    if frames and n_samples == frames * 300:
++        return np.repeat(values, 300)
++    if frames == 0:
++        return np.zeros(n_samples, dtype=values.dtype)
++    index = np.minimum((np.arange(n_samples) * frames / n_samples).astype(np.int64), frames - 1)
++    return values[index]
++
++
++def _region(samples, source_hz, target_hz, start, end, sr):
++    n = samples.shape[0]
++    marks = []
++    pos = float(start)
++    while pos < end:
++        f0 = float(source_hz[min(int(pos), n - 1)])
++        if not np.isfinite(f0) or f0 < 40.0:
++            pos += sr / 100.0
++            continue
++        period = max(sr / f0, 1.0)
++        center = int(round(pos))
++        half = max(1, int(round(period / 2.0)))
++        left = max(0, center - half)
++        right = min(n, center + half + 1)
++        if right <= left:
++            pos += period
++            continue
++        peak = left + int(np.argmax(np.abs(samples[left:right])))
++        if not marks or peak - marks[-1] >= half:
++            marks.append(peak)
++        pos += period
++    if len(marks) < 2:
++        return samples[start:end].copy()
++
++    acc = np.zeros(end - start, dtype=np.float64)
++    weight = np.zeros(end - start, dtype=np.float64)
++    syn = float(start)
++    mark_index = 0
++    while syn < end:
++        f_target = float(target_hz[min(int(syn), n - 1)])
++        if not np.isfinite(f_target) or f_target < 40.0:
++            syn += sr / 100.0
++            continue
++        while (
++            mark_index + 1 < len(marks)
++            and abs(marks[mark_index + 1] - syn) <= abs(marks[mark_index] - syn)
++        ):
++            mark_index += 1
++        mark = marks[mark_index]
++        f_source = float(source_hz[min(mark, n - 1)])
++        if not np.isfinite(f_source) or f_source < 40.0:
++            syn += max(sr / f_target, 1.0)
++            continue
++        half = max(2, int(round(sr / f_source)))
++        length = 2 * half
++        window = np.hanning(length)
++        center_out = int(round(syn))
++        src0 = mark - half
++        dst0 = center_out - half
++        src_lo = max(src0, 0)
++        src_hi = min(src0 + length, n)
++        dst_lo = dst0 + (src_lo - src0)
++        dst_hi = dst0 + (src_hi - src0)
++        if dst_lo < start:
++            src_lo += start - dst_lo
++            dst_lo = start
++        if dst_hi > end:
++            src_hi -= dst_hi - end
++            dst_hi = end
++        if src_hi > src_lo:
++            gain = window[src_lo - src0:src_hi - src0]
++            acc[dst_lo - start:dst_hi - start] += samples[src_lo:src_hi] * gain
++            weight[dst_lo - start:dst_hi - start] += gain
++        syn += max(sr / f_target, 1.0)
++
++    shifted = samples[start:end].copy()
++    voiced = weight > 1e-8
++    shifted[voiced] = acc[voiced] / weight[voiced]
++    fade = min(int(sr * 0.005), max(0, (end - start) // 8))
++    if fade > 1:
++        ramp = np.linspace(0.0, 1.0, fade)
++        original = samples[start:end]
++        shifted[:fade] = (1.0 - ramp) * original[:fade] + ramp * shifted[:fade]
++        shifted[-fade:] = ramp * original[-fade:] + (1.0 - ramp) * shifted[-fade:]
++    return shifted
++
++
++def psola(samples, source_hz, target_hz, mask, sr=24000):
++    """Return ``samples`` with masked spans moved from ``source_hz`` to ``target_hz``.
++
++    All three control arrays are either one value per sample or one value
++    per 300-sample F0 frame (Kokoro's fundamental frame). Unmasked samples
++    are copied unchanged.
++    """
++    samples = np.asarray(samples, dtype=np.float64)
++    n = int(samples.shape[0])
++    if n == 0:
++        return samples.copy()
++    source_hz = _at_audio_rate(np.asarray(source_hz, dtype=np.float64), n)
++    target_hz = _at_audio_rate(np.asarray(target_hz, dtype=np.float64), n)
++    mask = _at_audio_rate(np.asarray(mask, dtype=np.float64), n) >= 0.5
++    out = samples.copy()
++    index = 0
++    while index < n:
++        if not mask[index]:
++            index += 1
++            continue
++        end = index + 1
++        while end < n and mask[end]:
++            end += 1
++        out[index:end] = _region(samples, source_hz, target_hz, index, end, sr)
++        index = end
++    return out
+diff -Naur a/kokoro/speak.py b/kokoro/speak.py
+--- a/kokoro/speak.py	1970-01-01 01:00:00.000000000 +0100
++++ b/kokoro/speak.py	2026-11-06 17:57:31.957416511 +0100
+@@ -0,0 +1,727 @@
++"""Speak one text with more than one voice, language, or phoneme string.
++
++``-m`` and ``-l`` are the defaults. Tags in the text change one thing at
++a time:
++
++    <voice name="am_adam">character line</voice>
++    <lang code="a">Star Trek</lang>
++    <phoneme ph="stˈɑɹ tɹˈɛk">Star Trek</phoneme>
++    <pitch note="A4">I</pitch><pitch note="C5">like</pitch><pitch note="F4">dogs</pitch>
++    <pitch freq="450">I</pitch>
++
++A voice tag selects another style pack and, when that voice ships its own
++checkpoint, another model. Thorsten is a checkpoint of its own, not a pack
++for the shared Kokoro model. A language tag does not change the voice. It
++selects that language's spelling rules, so a German sentence can say the
++English title "Star Trek" instead of "Star" the bird (ʃtaːr, "shtar").
++
++A phoneme tag is already the model's symbols. It is not spelled again.
++Symbols outside the active checkpoint's alphabet are replaced with a close
++match or dropped.
++
++A pitch tag holds one note for the words inside it. ``note`` is a letter
++name in equal temperament: A4 is 440 Hz, sharps and flats are written
++C#5 or Bb3, and a missing number means octave 4, so A is A4 and C is
++middle C. ``freq`` is hertz and can sit between those notes. Several
++pitch tags in a row stay one utterance, so the line is sung instead of
++spoken one word at a time. Pitch does not change the voice or the
++language.
++
++Voice, language, and pitch tags nest. ``\\<`` writes a literal ``<``.
++Inside an English span, misaki's ``[word](/phonemes/)`` form still works.
++"""
++
++import math
++import re
++from dataclasses import dataclass, field
++
++from .assets import normalize_lang, require_model, require_voice, voice_meta
++from .phonemes import PITCH_GLIDE, fit_pitched
++
++MAX_PHONEMES = 510
++_G2P_CHUNK = 400
++_TAG_NAMES = {
++    'voice': 'voice',
++    'lang': 'lang',
++    'phoneme': 'phoneme',
++    'phonemes': 'phoneme',
++    'pitch': 'pitch',
++}
++_ALLOWED_ATTRS = {
++    'voice': {'name', 'lang'},
++    'lang': {'code', 'lang'},
++    'phoneme': {'ph'},
++    'pitch': {'freq', 'note'},
++}
++# Scientific pitch. A4 is MIDI 69. Index 0 is C.
++_NOTE_STEPS = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
++_NOTE_NAME = re.compile(r'^([A-G])([#♯b♭])?(-?\d+)?$', re.IGNORECASE)
++_CLOSE_PHONEME = re.compile(r'<\s*/\s*phonemes?\s*>', re.IGNORECASE)
++_TIGHT = frozenset('.,!?;:%)]}"”’')
++_BREAKS = ('.!?', ':;', ',—', ' ')
++
++_pipelines = {}
++
++
++@dataclass
++class Span:
++    text: str
++    voice: str
++    lang: str
++    raw: bool
++    freq: object = None
++
++
++@dataclass
++class Frame:
++    kind: str
++    voice: str
++    lang: str
++    freq: object = None
++
++
++@dataclass
++class VoiceInfo:
++    name: str
++    path: object
++    language: str
++    model: str
++
++
++@dataclass
++class Utterance:
++    """One synthesis call: one pack, one checkpoint, one phoneme string."""
++
++    voice: str
++    path: object
++    model: str
++    phonemes: str
++    graphemes: str
++    # One entry per phoneme character: hertz, PITCH_GLIDE, or None.
++    pitches: object = None
++
++
++def resolve_voice(name):
++    path = require_voice(name)
++    meta = voice_meta(path)
++    language = meta.get('language') or path.stem[:1]
++    language = normalize_lang(language)
++    model = str(meta.get('model') or 'kokoro-v1_0')
++    return VoiceInfo(name=path.stem, path=path, language=language, model=model)
++
++
++def _parse_attrs(body, allowed):
++    attrs = {}
++    i = 0
++    size = len(body)
++    while i < size:
++        while i < size and body[i].isspace():
++            i += 1
++        if i >= size:
++            break
++        start = i
++        while i < size and (body[i].isalnum() or body[i] in ':-_'):
++            i += 1
++        key = body[start:i].lower()
++        if not key:
++            raise SystemExit(f'Bad attribute in tag: {body!r}')
++        while i < size and body[i].isspace():
++            i += 1
++        if i >= size or body[i] != '=':
++            raise SystemExit(f'Attribute {key!r} needs a quoted value.')
++        i += 1
++        while i < size and body[i].isspace():
++            i += 1
++        if i >= size or body[i] not in '"\'':
++            raise SystemExit(f'Attribute {key!r} needs a quoted value.')
++        quote = body[i]
++        i += 1
++        start = i
++        while i < size and body[i] != quote:
++            i += 1
++        if i >= size:
++            raise SystemExit(f'Unclosed quote in attribute {key!r}.')
++        if key not in allowed:
++            raise SystemExit(f'Unknown attribute {key!r}.')
++        if key in attrs:
++            raise SystemExit(f'Duplicate attribute {key!r}.')
++        attrs[key] = body[start:i]
++        i += 1
++    return attrs
++
++
++def _read_tag(text, i):
++    """Parse one of our tags starting at ``text[i] == '<'``.
++
++    Return ``(end, closing, name, attrs, self_closing)``, or None when the
++    ``<`` is ordinary text.
++    """
++    size = len(text)
++    j = i + 1
++    closing = False
++    if j < size and text[j] == '/':
++        closing = True
++        j += 1
++    while j < size and text[j].isspace():
++        j += 1
++    start = j
++    while j < size and text[j].isalpha():
++        j += 1
++    raw = text[start:j].lower()
++    if raw not in _TAG_NAMES:
++        return None
++    name = _TAG_NAMES[raw]
++    buf = []
++    self_closing = False
++    while j < size:
++        ch = text[j]
++        if ch in '"\'':
++            endq = text.find(ch, j + 1)
++            if endq < 0:
++                raise SystemExit('Unclosed quote in a tag.')
++            buf.append(text[j:endq + 1])
++            j = endq + 1
++            continue
++        if ch == '>':
++            body = ''.join(buf).rstrip()
++            if body.endswith('/'):
++                self_closing = True
++                body = body[:-1].rstrip()
++            attrs = _parse_attrs(body, _ALLOWED_ATTRS[name])
++            return j + 1, closing, name, attrs, self_closing
++        buf.append(ch)
++        j += 1
++    raise SystemExit('Unclosed tag: missing ">".')
++
++
++def parse_markup(text, voice, lang):
++    """Split ``text`` into spans. ``voice`` and ``lang`` are the defaults.
++
++    Language codes are normalized. Voices are not looked up yet.
++    """
++    lang = normalize_lang(lang)
++    spans = []
++    stack = [Frame('root', voice, lang)]
++    buf = []
++    i = 0
++    size = len(text)
++
++    def flush():
++        if not buf:
++            return
++        chunk = ''.join(buf)
++        buf.clear()
++        if not chunk.strip():
++            return
++        cur = stack[-1]
++        spans.append(Span(chunk, cur.voice, cur.lang, cur.kind == 'phoneme', cur.freq))
++
++    while i < size:
++        if text[i] == '\\' and i + 1 < size and text[i + 1] == '<':
++            buf.append('<')
++            i += 2
++            continue
++        if text[i] != '<':
++            buf.append(text[i])
++            i += 1
++            continue
++        # A phoneme body is literal, including anything that looks like a tag,
++        # until its own closing tag.
++        if stack[-1].kind == 'phoneme':
++            close = _CLOSE_PHONEME.search(text, i)
++            if close is None:
++                raise SystemExit('Unclosed <phoneme> tag.')
++            buf.append(text[i:close.start()])
++            flush()
++            stack.pop()
++            i = close.end()
++            continue
++        tag = _read_tag(text, i)
++        if tag is None:
++            buf.append(text[i])
++            i += 1
++            continue
++        end, closing, name, attrs, self_closing = tag
++        flush()
++        i = end
++        if name == 'phoneme' and not closing:
++            ph = attrs.get('ph')
++            if ph is not None:
++                if ph.strip():
++                    cur = stack[-1]
++                    spans.append(Span(ph.strip(), cur.voice, cur.lang, True, cur.freq))
++                if not self_closing:
++                    close = _CLOSE_PHONEME.search(text, i)
++                    if close is None:
++                        raise SystemExit('Unclosed <phoneme> tag.')
++                    i = close.end()
++                continue
++            if self_closing:
++                continue
++            cur = stack[-1]
++            stack.append(Frame('phoneme', cur.voice, cur.lang, cur.freq))
++            continue
++        if closing:
++            if len(stack) == 1 or stack[-1].kind != name:
++                opened = stack[-1].kind
++                raise SystemExit(f'</{name}> does not match the open <{opened}> tag.')
++            stack.pop()
++            continue
++        if name == 'voice':
++            vname = attrs.get('name')
++            if not vname or not vname.strip():
++                raise SystemExit('A voice tag needs a name: <voice name="am_adam">.')
++            vlang = stack[-1].lang
++            if attrs.get('lang'):
++                vlang = normalize_lang(attrs['lang'])
++            if not self_closing:
++                stack.append(Frame('voice', vname.strip(), vlang, stack[-1].freq))
++            continue
++        if name == 'pitch':
++            freq = _pitch_attr(attrs)
++            if not self_closing:
++                cur = stack[-1]
++                stack.append(Frame('pitch', cur.voice, cur.lang, freq))
++            continue
++        code = attrs.get('code', attrs.get('lang'))
++        if not code or not str(code).strip():
++            raise SystemExit('A language tag needs a code: <lang code="a">.')
++        if not self_closing:
++            cur = stack[-1]
++            stack.append(Frame('lang', cur.voice, normalize_lang(code), cur.freq))
++    flush()
++    if len(stack) != 1:
++        raise SystemExit(f'Unclosed <{stack[-1].kind}> tag.')
++    return spans
++
++
++def _parse_freq(raw):
++    text = '' if raw is None else str(raw).strip()
++    try:
++        freq = float(text)
++    except ValueError:
++        freq = None
++    if freq is None or not math.isfinite(freq) or freq <= 0:
++        raise SystemExit(
++            f'Pitch frequency must be a positive number of hertz, not {raw!r}.'
++        )
++    return freq
++
++
++def _parse_note(raw):
++    """Equal temperament. A4 is 440 Hz. A missing octave means 4."""
++    text = '' if raw is None else str(raw).strip()
++    match = _NOTE_NAME.fullmatch(text)
++    if match is None:
++        raise SystemExit(
++            f'Pitch note must look like A4, C#5, or Bb3, not {raw!r}. '
++            'Use freq for a frequency in hertz.'
++        )
++    step = _NOTE_STEPS[match.group(1).upper()]
++    accidental = match.group(2)
++    if accidental in ('#', '♯'):
++        step += 1
++    elif accidental:
++        step -= 1
++    if match.group(3) is None:
++        octave = 4
++    else:
++        octave = int(match.group(3))
++        if octave < -1 or octave > 8:
++            raise SystemExit(f'Pitch note {raw!r} is outside octave -1 to 8.')
++    # C4 is MIDI 60, so octave 4 and step 0 land on 60. A4 is 69.
++    midi = (octave + 1) * 12 + step
++    return 440.0 * 2.0 ** ((midi - 69) / 12.0)
++
++
++def _pitch_attr(attrs):
++    has_freq = 'freq' in attrs
++    has_note = 'note' in attrs
++    if has_freq and has_note:
++        raise SystemExit('Use either freq or note on a pitch tag, not both.')
++    if has_freq:
++        return _parse_freq(attrs['freq'])
++    if has_note:
++        return _parse_note(attrs['note'])
++    raise SystemExit('A pitch tag needs freq="440" or note="A4".')
++
++
++def _as_hz(value):
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        return None
++    value = float(value)
++    if not math.isfinite(value) or value <= 0:
++        return None
++    return value
++
++
++def join_pieces(pieces):
++    """Join phoneme fragments. Tight punctuation stays on the previous word."""
++    out = ''
++    for piece in pieces:
++        piece = (piece or '').strip()
++        if not piece:
++            continue
++        if not out:
++            out = piece
++        elif piece[0] in _TIGHT:
++            out += piece
++        else:
++            out += ' ' + piece
++    return out
++
++
++def join_pitched(pieces):
++    """Join ``(phonemes, freq)`` pieces and record a pitch per character.
++
++    ``freq`` is a frequency in hertz, or None. A space inserted between
++    two notes is :data:`PITCH_GLIDE`. Any other inserted space keeps the
++    model's pitch. Tight punctuation stays on the previous piece.
++    """
++    chars = []
++    hz = []
++    for phonemes, freq in pieces:
++        phonemes = (phonemes or '').strip()
++        if not phonemes:
++            continue
++        if chars and phonemes[0] not in _TIGHT:
++            gap = PITCH_GLIDE if _as_hz(hz[-1]) is not None and _as_hz(freq) is not None else None
++            chars.append(' ')
++            hz.append(gap)
++        for _ch in phonemes:
++            chars.append(_ch)
++            hz.append(freq)
++    return ''.join(chars), hz
++
++
++def _aligned_strip(text, pitches):
++    start = 0
++    end = len(text)
++    while start < end and text[start].isspace():
++        start += 1
++    while end > start and text[end - 1].isspace():
++        end -= 1
++    if pitches is None:
++        return text[start:end], None
++    return text[start:end], pitches[start:end]
++
++
++def _one_freq(values):
++    chosen = None
++    for value in values:
++        if value is None:
++            continue
++        if chosen is None:
++            chosen = value
++            continue
++        if value != chosen:
++            return None
++    return chosen
++
++
++def _normalize_phonemes(phonemes, pitches):
++    phonemes = phonemes or ''
++    if pitches is not None and len(pitches) != len(phonemes):
++        pitches = None
++    if pitches is None:
++        return re.sub(r'\s+', ' ', phonemes).strip(), None
++    chars = []
++    hz = []
++    index = 0
++    size = len(phonemes)
++    while index < size:
++        if phonemes[index].isspace():
++            end = index + 1
++            while end < size and phonemes[end].isspace():
++                end += 1
++            chars.append(' ')
++            hz.append(_one_freq(pitches[index:end]))
++            index = end
++            continue
++        chars.append(phonemes[index])
++        hz.append(pitches[index])
++        index += 1
++    return _aligned_strip(''.join(chars), hz)
++
++
++def _cut_phonemes(phonemes, limit):
++    window = phonemes[:limit]
++    cut = 0
++    for group in _BREAKS:
++        at = max(window.rfind(ch) for ch in group)
++        if at > 0:
++            cut = at + 1
++            break
++    if cut <= 0:
++        cut = limit
++    return cut
++
++
++def chunk_pitched(phonemes, pitches=None, limit=MAX_PHONEMES):
++    """Like :func:`chunk_phonemes`, keeping a pitch list beside the text."""
++    phonemes, pitches = _normalize_phonemes(phonemes, pitches)
++    if not phonemes:
++        return []
++    chunks = []
++    while len(phonemes) > limit:
++        cut = _cut_phonemes(phonemes, limit)
++        left_hz = None if pitches is None else pitches[:cut]
++        right_hz = None if pitches is None else pitches[cut:]
++        piece, piece_hz = _aligned_strip(phonemes[:cut], left_hz)
++        rest, rest_hz = _aligned_strip(phonemes[cut:], right_hz)
++        if not piece:
++            left_hz = None if pitches is None else pitches[:limit]
++            right_hz = None if pitches is None else pitches[limit:]
++            piece, piece_hz = _aligned_strip(phonemes[:limit], left_hz)
++            rest, rest_hz = _aligned_strip(phonemes[limit:], right_hz)
++        if piece:
++            chunks.append((piece, piece_hz))
++        if not rest or rest == phonemes:
++            phonemes = ''
++            pitches = None
++            break
++        phonemes, pitches = rest, rest_hz
++    if phonemes:
++        chunks.append((phonemes, pitches))
++    return chunks
++
++
++def chunk_phonemes(phonemes, limit=MAX_PHONEMES):
++    """Split a phoneme string into chunks the model can speak.
++
++    Prefer a sentence end, then a pause, then a space, and only then a
++    hard cut. Chunks are at most ``limit`` symbols.
++    """
++    return [piece for piece, _hz in chunk_pitched(phonemes, None, limit)]
++
++
++def _pitches_for(hz):
++    if not hz or all(item is None for item in hz):
++        return None
++    return tuple(hz)
++
++
++def _split_for_g2p(text, lang):
++    text = text.strip()
++    if not text:
++        return []
++    # English misaki keeps context across the paragraph. espeak-ng can
++    # truncate a long argument, so other languages are cut on sentences
++    # the same way KPipeline cuts them.
++    if lang in 'ab' or len(text) <= _G2P_CHUNK:
++        return [text]
++    chunks = []
++    sentences = re.split(r'([.!?]+)', text)
++    current = ''
++    for index in range(0, len(sentences), 2):
++        sentence = sentences[index]
++        if index + 1 < len(sentences):
++            sentence += sentences[index + 1]
++        if current and len(current) + len(sentence) > _G2P_CHUNK:
++            chunks.append(current.strip())
++            current = sentence
++        else:
++            current += sentence
++    if current.strip():
++        chunks.append(current.strip())
++    if not chunks:
++        chunks = [text[i:i + _G2P_CHUNK] for i in range(0, len(text), _G2P_CHUNK)]
++    return [chunk for chunk in chunks if chunk.strip()]
++
++
++def get_pipeline(lang):
++    """Quiet pipeline: spelling rules only, no checkpoint."""
++    lang = normalize_lang(lang)
++    pipe = _pipelines.get(lang)
++    if pipe is None:
++        from .pipeline import KPipeline
++        try:
++            pipe = KPipeline(lang_code=lang, repo_id='hexgrad/Kokoro-82M', model=False)
++        except ImportError as exc:
++            raise SystemExit(
++                f'Language {lang!r} needs grapheme-to-phoneme support that is not installed.'
++            ) from exc
++        _pipelines[lang] = pipe
++    return pipe
++
++
++def phonemize(lang, text):
++    lang = normalize_lang(lang)
++    g2p = get_pipeline(lang).g2p
++    parts = []
++    for chunk in _split_for_g2p(text, lang):
++        ps, _tokens = g2p(chunk)
++        if ps and ps.strip():
++            parts.append(ps.strip())
++    return join_pieces(parts)
++
++
++def _load_vocab(model_name):
++    import json
++    config, _weights = require_model(model_name)
++    with open(config, encoding='utf-8') as handle:
++        return json.load(handle)['vocab']
++
++
++def plan_utterances(
++    text,
++    voice,
++    lang,
++    model=None,
++    resolve=None,
++    phonemize_fn=None,
++    vocab_for=None,
++):
++    """Turn tagged text into synthesis calls.
++
++    Spans that share a pack and a checkpoint are one phoneme string, so a
++    language change or a new note inside a sentence keeps one prosody. A
++    different pack, or a newline, starts a new call. ``model``, when set,
++    overrides the checkpoint of the default voice only.
++    """
++    resolve = resolve or resolve_voice
++    phonemize_fn = phonemize_fn or phonemize
++    spans = parse_markup(text, voice, lang)
++    infos = {}
++    for span in spans:
++        if span.voice not in infos:
++            infos[span.voice] = resolve(span.voice)
++    vocabs = {}
++
++    def vocab_of(model_name):
++        if model_name not in vocabs:
++            if vocab_for is not None:
++                vocabs[model_name] = vocab_for(model_name)
++            else:
++                vocabs[model_name] = _load_vocab(model_name)
++        return vocabs[model_name]
++
++    @dataclass
++    class _Acc:
++        key: object = None
++        info: object = None
++        model_name: object = None
++        pieces: list = field(default_factory=list)
++        graphs: list = field(default_factory=list)
++
++    acc = _Acc()
++    utterances = []
++
++    def flush():
++        if not acc.pieces:
++            acc.graphs.clear()
++            return
++        phones, hz = join_pitched(acc.pieces)
++        ps, hz = fit_pitched(phones, hz, vocab_of(acc.model_name))
++        graph = ''.join(acc.graphs).strip()
++        for chunk, chunk_hz in chunk_pitched(ps, hz):
++            utterances.append(Utterance(
++                voice=acc.info.name,
++                path=acc.info.path,
++                model=acc.model_name,
++                phonemes=chunk,
++                graphemes=graph,
++                pitches=_pitches_for(chunk_hz),
++            ))
++        acc.pieces.clear()
++        acc.graphs.clear()
++
++    def add(info, model_name, phone, graph, freq):
++        key = (str(info.path), model_name)
++        if acc.key != key:
++            flush()
++            acc.key = key
++            acc.info = info
++            acc.model_name = model_name
++        phone = (phone or '').strip()
++        if not phone:
++            return
++        acc.pieces.append((phone, freq))
++        acc.graphs.append(graph)
++
++    for span in spans:
++        info = infos[span.voice]
++        model_name = info.model
++        if model and span.voice == voice:
++            model_name = model
++        parts = re.split(r'\n+', span.text)
++        for index, part in enumerate(parts):
++            if index:
++                flush()
++            if not part.strip():
++                continue
++            phone = part if span.raw else phonemize_fn(span.lang, part)
++            add(info, model_name, phone, part, span.freq)
++    flush()
++    return utterances
++
++
++def prepare_speech(text, voice='af_heart', lang=None, model=None):
++    """Parse and phonemize. Load no checkpoint weights."""
++    text = '' if text is None else str(text).strip()
++    if lang is None:
++        lang = resolve_voice(voice).language
++    else:
++        lang = normalize_lang(lang)
++    if not text:
++        resolve_voice(voice)
++        return []
++    return plan_utterances(text, voice=voice, lang=lang, model=model)
++
++
++def open_models(utterances):
++    """Load each checkpoint named by ``utterances`` once."""
++    import torch
++    from .model import KModel
++
++    device = 'cuda' if torch.cuda.is_available() else 'cpu'
++    models = {}
++    for utterance in utterances:
++        if utterance.model in models:
++            continue
++        config, weights = require_model(utterance.model)
++        models[utterance.model] = KModel(
++            repo_id='hexgrad/Kokoro-82M',
++            config=str(config),
++            model=str(weights),
++        ).to(device).eval()
++    return models
++
++
++def _holder():
++    if _pipelines:
++        return next(iter(_pipelines.values()))
++    return get_pipeline('a')
++
++
++def iter_audio(utterances, models, speed=1.0):
++    """Speak planned utterances. Packs are loaded by the pipeline."""
++    if not utterances:
++        return
++    holder = _holder()
++    for utterance in utterances:
++        if not utterance.phonemes:
++            continue
++        kmodel = models[utterance.model]
++        for result in holder.generate_from_tokens(
++            utterance.phonemes,
++            voice=str(utterance.path),
++            speed=speed,
++            model=kmodel,
++            pitches=utterance.pitches,
++        ):
++            if utterance.graphemes:
++                result.graphemes = utterance.graphemes
++            yield result
++
++
++def speak(text, voice='af_heart', lang=None, speed=1.0, model=None):
++    """Yield audio results for ``text``.
++
++    Voice, language, phoneme, and pitch tags are honored.
++    """
++    utterances = prepare_speech(text, voice=voice, lang=lang, model=model)
++    if not utterances:
++        return
++    models = open_models(utterances)
++    yield from iter_audio(utterances, models, speed)
+diff -Naur a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml	2026-04-17 15:25:57.000000000 +0200
++++ b/pyproject.toml	2026-11-06 17:55:53.646678022 +0100
 @@ -16,11 +16,11 @@
      "License :: OSI Approved :: Apache Software License",
      "Operating System :: OS Independent"
@@ -412,3 +1837,842 @@ diff -Naur pristine/kokoro/pyproject.toml src/kokoro-b96fef95e6a746495f92443fac7
      "numpy",
      "torch",
      "transformers"
+diff -Naur a/tests/test_speak.py b/tests/test_speak.py
+--- a/tests/test_speak.py	1970-01-01 01:00:00.000000000 +0100
++++ b/tests/test_speak.py	2026-11-06 18:00:03.484203458 +0100
+@@ -0,0 +1,835 @@
++"""Mixer: one text, several voices, languages, and raw phoneme spans."""
++
++import json
++import unittest
++import wave
++from pathlib import Path
++
++from kokoro.assets import normalize_lang
++from kokoro.model import impose_pitch
++from kokoro.pitch import psola
++from kokoro.phonemes import PITCH_GLIDE, fit_phonemes, fit_pitched
++from kokoro.pipeline import _clip_phonemes
++from kokoro.speak import (
++    chunk_phonemes,
++    chunk_pitched,
++    join_pieces,
++    parse_markup,
++    phonemize,
++    plan_utterances,
++    prepare_speech,
++    resolve_voice,
++    VoiceInfo,
++)
++
++VOCAB = json.load(
++    open('/usr/share/kokoro/models/thorsten/config.json', encoding='utf-8')
++)['vocab']
++ASCII = {chr(code): 1 for code in range(32, 127)}
++
++
++def _identity_vocab(_model):
++    class _All:
++        def __contains__(self, key):
++            return True
++
++        def __bool__(self):
++            return True
++
++    return _All()
++
++
++class FitTests(unittest.TestCase):
++    def test_known_symbols_stay(self):
++        text = 'stˈɑɹ tɹˈɛk'
++        self.assertEqual(fit_phonemes(text, VOCAB), text)
++
++    def test_short_u_becomes_y(self):
++        self.assertEqual(fit_phonemes('fˈʏnf', VOCAB), 'fˈynf')
++
++    def test_ascii_g_becomes_script_g(self):
++        self.assertEqual(fit_phonemes('g', VOCAB), 'ɡ')
++
++    def test_nasal_vowel_decomposes(self):
++        self.assertEqual(fit_phonemes('ã', VOCAB), 'a\u0303')
++
++    def test_german_umlaut_letters(self):
++        self.assertEqual(fit_phonemes('äöü', VOCAB), 'ɛøy')
++
++    def test_acute_becomes_stress(self):
++        self.assertEqual(fit_phonemes('á', VOCAB), 'ˈa')
++
++    def test_unknown_is_dropped(self):
++        self.assertEqual(fit_phonemes('stˈɑɹ☃tɹˈɛk', VOCAB), 'stˈɑɹtɹˈɛk')
++        self.assertNotIn('☃', fit_phonemes('☃', VOCAB))
++
++    def test_pitch_follows_replaced_symbols(self):
++        text, hz = fit_pitched('á☃b', [440.0, 10.0, 20.0], VOCAB)
++        self.assertEqual(text, 'ˈab')
++        self.assertEqual(hz, [440.0, 440.0, 20.0])
++        self.assertEqual(fit_pitched('ab', None, VOCAB), (fit_phonemes('ab', VOCAB), None))
++
++    def test_pipeline_clip_uses_the_same_map(self):
++        class Model:
++            vocab = VOCAB
++
++        self.assertEqual(_clip_phonemes('fˈʏnf ☃', Model()), 'fˈynf ')
++
++
++class ParseTests(unittest.TestCase):
++    def test_plain_text_is_one_span(self):
++        spans = parse_markup('Der Star sang.', 'thorsten', 'd')
++        self.assertEqual(len(spans), 1)
++        self.assertEqual(spans[0].text, 'Der Star sang.')
++        self.assertEqual(spans[0].voice, 'thorsten')
++        self.assertEqual(spans[0].lang, 'd')
++        self.assertFalse(spans[0].raw)
++
++    def test_voice_does_not_change_language(self):
++        spans = parse_markup(
++            'A <voice name="am_adam">B</voice> C',
++            'af_heart',
++            'd',
++        )
++        self.assertEqual(
++            [(s.text, s.voice, s.lang, s.raw) for s in spans],
++            [
++                ('A ', 'af_heart', 'd', False),
++                ('B', 'am_adam', 'd', False),
++                (' C', 'af_heart', 'd', False),
++            ],
++        )
++
++    def test_voice_lang_attribute(self):
++        spans = parse_markup(
++            '<voice name="af_heart" lang="en-us">Hello</voice>',
++            'thorsten',
++            'de',
++        )
++        self.assertEqual(spans[0].voice, 'af_heart')
++        self.assertEqual(spans[0].lang, 'a')
++
++    def test_lang_tag_keeps_voice(self):
++        spans = parse_markup(
++            'Der Star mag <lang code="a">Star Trek</lang> sehr.',
++            'thorsten',
++            'd',
++        )
++        self.assertEqual([s.voice for s in spans], ['thorsten', 'thorsten', 'thorsten'])
++        self.assertEqual([s.lang for s in spans], ['d', 'a', 'd'])
++        self.assertEqual(spans[1].text, 'Star Trek')
++
++    def test_phoneme_attribute_ignores_body(self):
++        spans = parse_markup(
++            'mag <phoneme ph="stˈɑɹ tɹˈɛk">Star Trek</phoneme> sehr',
++            'thorsten',
++            'd',
++        )
++        self.assertEqual(spans[1].text, 'stˈɑɹ tɹˈɛk')
++        self.assertTrue(spans[1].raw)
++
++    def test_phoneme_body(self):
++        spans = parse_markup('<phoneme>stˈɑɹ</phoneme>', 'thorsten', 'd')
++        self.assertEqual(spans[0].text, 'stˈɑɹ')
++        self.assertTrue(spans[0].raw)
++
++    def test_escape(self):
++        spans = parse_markup(r'Use \<voice name="x"> literally', 'af_heart', 'a')
++        self.assertEqual(spans[0].text, 'Use <voice name="x"> literally')
++        self.assertFalse(spans[0].raw)
++
++    def test_english_link_syntax_stays_text(self):
++        text = 'See [Kokoro](/kˈOkəɹO/) now'
++        spans = parse_markup(text, 'af_heart', 'a')
++        self.assertEqual(len(spans), 1)
++        self.assertEqual(spans[0].text, text)
++
++    def test_aliases(self):
++        self.assertEqual(normalize_lang('de'), 'd')
++        self.assertEqual(normalize_lang('en-GB'), 'b')
++
++    def test_bad_markup(self):
++        with self.assertRaises(SystemExit):
++            parse_markup('<voice name="am_adam">hi', 'thorsten', 'd')
++        with self.assertRaises(SystemExit):
++            parse_markup('<lang code="a">hi</voice>', 'thorsten', 'd')
++        with self.assertRaises(SystemExit):
++            parse_markup('<lang code="nope">hi</lang>', 'thorsten', 'd')
++        with self.assertRaises(SystemExit):
++            parse_markup('<voice>hi</voice>', 'thorsten', 'd')
++        for bad in (
++            '<pitch>hi</pitch>',
++            '<pitch freq="0">hi</pitch>',
++            '<pitch freq="-2">hi</pitch>',
++            '<pitch freq="nope">hi</pitch>',
++            '<pitch freq="440">hi',
++            '<pitch freq="440" name="x">hi</pitch>',
++            '<pitch note="H4">hi</pitch>',
++            '<pitch note="A440">hi</pitch>',
++            '<pitch note="C99">hi</pitch>',
++            '<pitch note="C-2">hi</pitch>',
++            '<pitch note="">hi</pitch>',
++            '<pitch note="A4b">hi</pitch>',
++            '<pitch freq="440" note="A4">hi</pitch>',
++        ):
++            with self.assertRaises(SystemExit):
++                parse_markup(bad, 'thorsten', 'd')
++
++    def test_note_names_and_frequencies(self):
++        def hz(semitones):
++            return 440.0 * 2.0 ** (semitones / 12.0)
++
++        spans = parse_markup(
++            '<pitch note="A4">a</pitch>'
++            '<pitch note="a">b</pitch>'
++            '<pitch note="C">c</pitch>'
++            '<pitch note="C5">d</pitch>'
++            '<pitch note="F4">e</pitch>'
++            '<pitch note="C#5">f</pitch>'
++            '<pitch note="Bb4">g</pitch>'
++            '<pitch freq="450">h</pitch>',
++            'thorsten',
++            'd',
++        )
++        self.assertEqual(spans[0].freq, 440.0)
++        self.assertEqual(spans[1].freq, 440.0)
++        self.assertAlmostEqual(spans[2].freq, hz(-9))
++        self.assertEqual(spans[2].freq, parse_markup('<pitch note="C4">x</pitch>', 't', 'd')[0].freq)
++        self.assertAlmostEqual(spans[3].freq, hz(3))
++        self.assertAlmostEqual(spans[4].freq, hz(-4))
++        self.assertAlmostEqual(spans[5].freq, hz(4))
++        self.assertEqual(
++            spans[6].freq,
++            parse_markup('<pitch note="A#4">x</pitch>', 't', 'd')[0].freq,
++        )
++        self.assertAlmostEqual(spans[6].freq, hz(1))
++        self.assertEqual(spans[7].freq, 450.0)
++        self.assertTrue(hz(0) < spans[7].freq < hz(1))
++        self.assertEqual(
++            parse_markup('<pitch note="C♯5">x</pitch>', 't', 'd')[0].freq,
++            spans[5].freq,
++        )
++        self.assertEqual(
++            parse_markup('<pitch note="bb4">x</pitch>', 't', 'd')[0].freq,
++            spans[6].freq,
++        )
++        self.assertEqual(
++            parse_markup('<pitch note="B#4">x</pitch>', 't', 'd')[0].freq,
++            spans[3].freq,
++        )
++        self.assertEqual(
++            parse_markup('<pitch note="Cb4">x</pitch>', 't', 'd')[0].freq,
++            parse_markup('<pitch note="B3">x</pitch>', 't', 'd')[0].freq,
++        )
++        self.assertEqual(
++            parse_markup('<pitch note="B♭4">x</pitch>', 't', 'd')[0].freq,
++            spans[6].freq,
++        )
++
++    def test_pitch_keeps_voice_and_language(self):
++        spans = parse_markup('<PITCH FREQ="440">la</PITCH>', 'thorsten', 'd')
++        self.assertEqual(len(spans), 1)
++        self.assertEqual(spans[0].text, 'la')
++        self.assertEqual(spans[0].voice, 'thorsten')
++        self.assertEqual(spans[0].lang, 'd')
++        self.assertEqual(spans[0].freq, 440.0)
++        self.assertFalse(spans[0].raw)
++
++    def test_inner_pitch_overrides(self):
++        spans = parse_markup(
++            '<pitch freq="440">aa <pitch freq="880">bb</pitch> cc</pitch>',
++            'thorsten',
++            'd',
++        )
++        self.assertEqual(
++            [(span.text, span.freq) for span in spans],
++            [('aa ', 440.0), ('bb', 880.0), (' cc', 440.0)],
++        )
++        self.assertTrue(all(span.voice == 'thorsten' and span.lang == 'd' for span in spans))
++
++    def test_phoneme_inside_pitch_keeps_the_note(self):
++        spans = parse_markup(
++            '<pitch freq="349.23"><phoneme ph="ab">no</phoneme></pitch>',
++            'thorsten',
++            'd',
++        )
++        self.assertEqual(spans[0].text, 'ab')
++        self.assertTrue(spans[0].raw)
++        self.assertEqual(spans[0].freq, 349.23)
++
++
++class JoinTests(unittest.TestCase):
++    def test_join_and_chunk(self):
++        self.assertEqual(
++            join_pieces(['ɛɾ mˈɑːk', 'stˈɑɹ tɹˈɛk', 'zˈeːɾ.']),
++            'ɛɾ mˈɑːk stˈɑɹ tɹˈɛk zˈeːɾ.',
++        )
++        self.assertEqual(join_pieces(['Hallo', '.']), 'Hallo.')
++        long = ' '.join(['a' * 20] * 40)
++        chunks = chunk_phonemes(long, limit=100)
++        self.assertTrue(chunks)
++        self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
++        self.assertEqual(join_pieces(chunks), long)
++
++    def test_chunk_keeps_a_pitch_on_every_symbol(self):
++        text = (('a' * 30 + ' ') * 5).strip()
++        pitches = []
++        freq = 100.0
++        for ch in text:
++            if ch == ' ':
++                pitches.append(PITCH_GLIDE)
++                freq += 10.0
++            else:
++                pitches.append(freq)
++        chunks = chunk_pitched(text, pitches, limit=40)
++        self.assertGreater(len(chunks), 1)
++        self.assertEqual(
++            ''.join(piece for piece, _hz in chunks).replace(' ', ''),
++            text.replace(' ', ''),
++        )
++        for piece, hz in chunks:
++            self.assertEqual(len(piece), len(hz))
++            self.assertLessEqual(len(piece), 40)
++
++
++def _pack(name, model, language='a'):
++    return VoiceInfo(name, Path(name + '.pt'), language, model)
++
++
++class PlanTests(unittest.TestCase):
++    def test_same_model_voices_are_separate_packs(self):
++        def resolve(name):
++            return _pack(name, 'kokoro-v1_0')
++
++        utterances = plan_utterances(
++            '<voice name="af_heart">Hello</voice> <voice name="am_adam">there</voice>',
++            voice='af_heart',
++            lang='a',
++            resolve=resolve,
++            phonemize_fn=lambda lang, text: text.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual(len(utterances), 2)
++        self.assertEqual(utterances[0].model, 'kokoro-v1_0')
++        self.assertEqual(utterances[1].model, 'kokoro-v1_0')
++        self.assertNotEqual(utterances[0].path, utterances[1].path)
++        self.assertEqual(utterances[0].phonemes, 'Hello')
++        self.assertEqual(utterances[1].phonemes, 'there')
++
++    def test_language_change_stays_one_utterance(self):
++        def resolve(name):
++            return _pack(name, 'thorsten', 'd')
++
++        utterances = plan_utterances(
++            'Hello <lang code="d">Welt</lang>',
++            voice='thorsten',
++            lang='d',
++            resolve=resolve,
++            phonemize_fn=lambda lang, text: text.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual(len(utterances), 1)
++        self.assertEqual(utterances[0].phonemes, 'Hello Welt')
++        self.assertEqual(utterances[0].model, 'thorsten')
++        self.assertIsNone(utterances[0].pitches)
++
++    def test_thorsten_is_a_different_model(self):
++        def resolve(name):
++            if name == 'thorsten':
++                return _pack(name, 'thorsten', 'd')
++            return _pack(name, 'kokoro-v1_0', 'a')
++
++        utterances = plan_utterances(
++            '<voice name="af_heart">Hello</voice> <voice name="thorsten">Hallo</voice>',
++            voice='af_heart',
++            lang='a',
++            resolve=resolve,
++            phonemize_fn=lambda lang, text: text.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual([item.model for item in utterances], ['kokoro-v1_0', 'thorsten'])
++
++    def test_newline_splits(self):
++        def resolve(name):
++            return _pack(name, 'thorsten', 'd')
++
++        utterances = plan_utterances(
++            'Hello\n\nWorld',
++            voice='thorsten',
++            lang='d',
++            resolve=resolve,
++            phonemize_fn=lambda lang, text: text.strip(),
++            vocab_for=lambda _model: ASCII,
++        )
++        self.assertEqual([item.phonemes for item in utterances], ['Hello', 'World'])
++
++    def test_pitch_notes_stay_one_utterance(self):
++        def resolve(name):
++            return _pack(name, 'kokoro-v1_0')
++
++        text = (
++            '<pitch freq="440">I</pitch>'
++            '<pitch freq="523.5">like</pitch>'
++            '<pitch freq="349.23">dogs</pitch>'
++        )
++        utterances = plan_utterances(
++            text,
++            voice='af_heart',
++            lang='a',
++            resolve=resolve,
++            phonemize_fn=lambda lang, part: part.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual(len(utterances), 1)
++        self.assertEqual(utterances[0].phonemes, 'I like dogs')
++        self.assertEqual(
++            utterances[0].pitches,
++            (
++                440.0, PITCH_GLIDE,
++                523.5, 523.5, 523.5, 523.5,
++                PITCH_GLIDE,
++                349.23, 349.23, 349.23, 349.23,
++            ),
++        )
++
++    def test_note_names_stay_one_utterance(self):
++        def resolve(name):
++            return _pack(name, 'kokoro-v1_0')
++
++        def hz(semitones):
++            return 440.0 * 2.0 ** (semitones / 12.0)
++
++        utterances = plan_utterances(
++            '<pitch note="A">I</pitch><pitch note="C5">like</pitch><pitch note="F">dogs</pitch>',
++            voice='af_heart',
++            lang='a',
++            resolve=resolve,
++            phonemize_fn=lambda lang, part: part.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual(len(utterances), 1)
++        self.assertEqual(utterances[0].phonemes, 'I like dogs')
++        self.assertEqual(
++            utterances[0].pitches,
++            (
++                hz(0), PITCH_GLIDE,
++                hz(3), hz(3), hz(3), hz(3),
++                PITCH_GLIDE,
++                hz(-4), hz(-4), hz(-4), hz(-4),
++            ),
++        )
++
++    def test_pitch_survives_a_voice_change(self):
++        def resolve(name):
++            return _pack(name, 'kokoro-v1_0')
++
++        def boom(lang, part):
++            raise AssertionError(part)
++
++        utterances = plan_utterances(
++            '<pitch freq="440"><voice name="af_heart"><phoneme>aa</phoneme></voice>'
++            '<voice name="am_adam">bb</voice></pitch>',
++            voice='af_heart',
++            lang='a',
++            resolve=resolve,
++            phonemize_fn=lambda lang, part: part.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual([item.phonemes for item in utterances], ['aa', 'bb'])
++        self.assertEqual(utterances[0].pitches, (440.0, 440.0))
++        self.assertEqual(utterances[1].pitches, (440.0, 440.0))
++        self.assertNotEqual(utterances[0].path, utterances[1].path)
++        with self.assertRaises(AssertionError):
++            plan_utterances(
++                '<pitch freq="440">hi</pitch>',
++                voice='af_heart',
++                lang='a',
++                resolve=resolve,
++                phonemize_fn=boom,
++                vocab_for=_identity_vocab,
++            )
++
++    def test_model_override_is_only_the_default_voice(self):
++        def resolve(name):
++            if name == 'thorsten':
++                return _pack(name, 'thorsten', 'd')
++            return _pack(name, 'kokoro-v1_0', 'a')
++
++        utterances = plan_utterances(
++            'Hallo <voice name="af_heart">Hello</voice>',
++            voice='thorsten',
++            lang='d',
++            model='other-checkpoint',
++            resolve=resolve,
++            phonemize_fn=lambda lang, text: text.strip(),
++            vocab_for=_identity_vocab,
++        )
++        self.assertEqual(utterances[0].model, 'other-checkpoint')
++        self.assertEqual(utterances[1].model, 'kokoro-v1_0')
++
++
++class GermanTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.vocab = VOCAB
++        cls.bird = fit_phonemes(phonemize('d', 'Star'), cls.vocab)
++        cls.title = fit_phonemes(phonemize('a', 'Star Trek'), cls.vocab)
++        cls.five = fit_phonemes(phonemize('d', 'fünf'), cls.vocab)
++
++    def test_star_alone_is_the_bird(self):
++        self.assertIn('ʃ', self.bird)
++        self.assertNotIn('stˈɑɹ', self.bird)
++        self.assertNotEqual(self.bird, self.title)
++
++    def test_title_inside_german_uses_english_spelling(self):
++        text = 'Der Star mag <lang code="a">Star Trek</lang> sehr.'
++        plain = 'Der Star mag Star Trek sehr.'
++        mixed = prepare_speech(text, voice='thorsten', lang='d')
++        bare = prepare_speech(plain, voice='thorsten', lang='d')
++        self.assertEqual(len(mixed), 1)
++        self.assertEqual(mixed[0].model, 'thorsten')
++        self.assertEqual(mixed[0].voice, 'thorsten')
++        self.assertIn(self.bird, mixed[0].phonemes)
++        self.assertIn(self.title, mixed[0].phonemes)
++        self.assertIn(self.bird, bare[0].phonemes)
++        self.assertNotIn(self.title, bare[0].phonemes)
++
++    def test_voice_keeps_german_rules_until_lang_is_set(self):
++        def resolve(name):
++            if name == 'thorsten':
++                return resolve_voice(name)
++            return _pack(name, 'kokoro-v1_0', 'a')
++
++        kept = plan_utterances(
++            'Der <voice name="af_heart">Star</voice> sang.',
++            voice='thorsten',
++            lang='d',
++            resolve=resolve,
++            vocab_for=lambda _model: self.vocab,
++        )
++        switched = plan_utterances(
++            'Der <voice name="af_heart" lang="a">Star</voice> sang.',
++            voice='thorsten',
++            lang='d',
++            resolve=resolve,
++            vocab_for=lambda _model: self.vocab,
++        )
++        self.assertEqual(kept[1].phonemes, self.bird)
++        self.assertEqual(kept[1].model, 'kokoro-v1_0')
++        self.assertEqual(switched[1].phonemes, fit_phonemes(phonemize('a', 'Star'), self.vocab))
++        self.assertNotEqual(kept[1].phonemes, switched[1].phonemes)
++
++    def test_raw_phonemes_skip_spelling(self):
++        utterances = prepare_speech(
++            'Der Star mag <phoneme ph="stˈɑɹ tɹˈɛk">Star Trek</phoneme> sehr.',
++            voice='thorsten',
++            lang='d',
++        )
++        self.assertEqual(len(utterances), 1)
++        self.assertIn(self.title, utterances[0].phonemes)
++        self.assertIn(self.bird, utterances[0].phonemes)
++
++    def test_unknown_phoneme_symbol_is_dropped(self):
++        utterances = prepare_speech(
++            '<phoneme>stˈɑɹ☃tɹˈɛk</phoneme>',
++            voice='thorsten',
++            lang='d',
++        )
++        self.assertEqual(utterances[0].phonemes, 'stˈɑɹtɹˈɛk')
++
++    def test_english_phoneme_link_stays_on_the_voice_model(self):
++        # misaki's [word](/phonemes/) form still works inside an English span.
++        utterances = prepare_speech(
++            'Say [Star Trek](/stˈɑɹ tɹˈɛk/) please.',
++            voice='thorsten',
++            lang='a',
++        )
++        self.assertEqual(len(utterances), 1)
++        self.assertEqual(utterances[0].model, 'thorsten')
++        self.assertIn('stˈɑɹ tɹˈɛk', utterances[0].phonemes)
++
++    def test_funf_uses_y_not_short_u(self):
++        utterances = prepare_speech('fünf', voice='thorsten', lang='d')
++        self.assertNotIn('ʏ', utterances[0].phonemes)
++        self.assertIn('y', utterances[0].phonemes)
++        self.assertEqual(utterances[0].phonemes, self.five)
++
++    def test_missing_voice(self):
++        with self.assertRaises(SystemExit) as caught:
++            prepare_speech('<voice name="no_such_voice_zz">Hi</voice>', voice='thorsten', lang='d')
++        self.assertIn('not installed', str(caught.exception))
++
++
++class PitchCurveTests(unittest.TestCase):
++    def test_notes_replace_voiced_frames_and_glide(self):
++        import torch
++
++        curve = torch.full((1, 16), 100.0)
++        curve[0, 3] = 0.0
++        curve[0, 4] = 10.0
++        out = impose_pitch(curve, torch.tensor([1, 2, 2, 2, 1]), [440.0, PITCH_GLIDE, 880.0])
++        got = [round(value, 4) for value in out[0].tolist()]
++        self.assertEqual(got[0:2], [100.0, 100.0])
++        self.assertEqual(got[2], 440.0)
++        self.assertEqual(got[3], 0.0)
++        self.assertEqual(got[4], 10.0)
++        self.assertEqual(got[5], 440.0)
++        self.assertTrue(all(440.0 < value < 880.0 for value in got[6:10]))
++        self.assertLess(got[6], got[7])
++        self.assertLess(got[7], got[8])
++        self.assertLess(got[8], got[9])
++        self.assertEqual(got[10:14], [880.0, 880.0, 880.0, 880.0])
++        self.assertEqual(got[14:16], [100.0, 100.0])
++
++    def test_speech_between_notes_is_not_a_glide(self):
++        import torch
++
++        out = impose_pitch(
++            torch.full((1, 10), 100.0),
++            torch.tensor([1, 1, 1, 1, 1]),
++            [440.0, None, 880.0],
++        )
++        got = out[0].tolist()
++        self.assertEqual(got[2:4], [440.0, 440.0])
++        self.assertEqual(got[4:6], [100.0, 100.0])
++        self.assertEqual(got[6:8], [880.0, 880.0])
++
++    def test_a_bad_map_leaves_the_curve(self):
++        import torch
++
++        curve = torch.arange(8, dtype=torch.float32)
++        out = impose_pitch(curve, torch.tensor([1, 1, 1, 1]), [440.0])
++        self.assertTrue(torch.equal(out, curve))
++
++    def test_psola_moves_a_vowel_onto_the_note(self):
++        import numpy as np
++
++        sr = 24000
++        seconds = 0.4
++        n = int(sr * seconds)
++        time = np.arange(n) / sr
++        source = 150.0
++        wave = np.zeros(n)
++        for harmonic in range(1, 12):
++            wave += np.sin(2 * np.pi * harmonic * source * time) / harmonic
++        spoken = wave.copy()
++        spoken[:1000] += 0.2 * np.sin(2 * np.pi * 90 * time[:1000])
++        for target in (349.23, 440.0, 523.5):
++            mask = np.zeros(n)
++            mask[1000:] = 1.0
++            sung = psola(
++                spoken,
++                np.full(n, source),
++                np.full(n, target),
++                mask,
++                sr=sr,
++            )
++            self.assertEqual(sung.shape, spoken.shape)
++            self.assertTrue(np.array_equal(sung[:1000], spoken[:1000]))
++            peak = _spectral_peak(sung[2000:], sr)
++            self.assertLess(
++                abs(peak - target) / target,
++                0.04,
++                f'{peak:.1f} Hz is not {target} Hz',
++            )
++            original_peak = _spectral_peak(spoken[2000:], sr)
++            self.assertLess(abs(original_peak - source) / source, 0.04)
++
++
++def _spectral_peak(audio, sr=24000, low=70.0, high=1000.0):
++    """Frequency of the strongest spectral peak, in hertz."""
++    import numpy as np
++
++    samples = np.asarray(audio, dtype=np.float64)
++    if samples.size < 64:
++        return None
++    samples = samples - samples.mean()
++    window = np.hanning(samples.size)
++    spectrum = np.abs(np.fft.rfft(samples * window))
++    freqs = np.fft.rfftfreq(samples.size, 1.0 / sr)
++    band = np.where((freqs >= low) & (freqs <= high))[0]
++    if band.size == 0:
++        return None
++    local = int(band[np.argmax(spectrum[band])])
++    if 0 < local < spectrum.size - 1:
++        left, mid, right = spectrum[local - 1], spectrum[local], spectrum[local + 1]
++        denom = left - 2.0 * mid + right
++        if denom:
++            shift = 0.5 * (left - right) / denom
++            if abs(shift) < 1.0:
++                return float(freqs[local] + shift * (freqs[1] - freqs[0]))
++    return float(freqs[local])
++
++
++class AudioTests(unittest.TestCase):
++    def test_mixed_sentence_writes_audio(self):
++        from kokoro.speak import speak
++
++        results = list(speak(
++            'Der Star mag <lang code="a">Star Trek</lang>.',
++            voice='thorsten',
++            lang='d',
++        ))
++        self.assertTrue(results)
++        audio = results[0].audio
++        self.assertIsNotNone(audio)
++        self.assertGreater(audio.numel(), 1000)
++        self.assertGreater(float(audio.abs().mean()), 0.0)
++        self.assertIn('stˈɑɹ', results[0].phonemes)
++        self.assertIn('ʃ', results[0].phonemes)
++        # What the checkpoint received is in its alphabet.
++        self.assertTrue(all(ch in VOCAB for ch in results[0].phonemes))
++
++    def test_two_packs_on_one_checkpoint(self):
++        import os
++        import tempfile
++
++        from kokoro.speak import speak
++
++        src = Path('/usr/share/kokoro')
++        tmp = Path(tempfile.mkdtemp())
++        (tmp / 'models').symlink_to(src / 'models')
++        voices = tmp / 'voices'
++        voices.mkdir()
++        for name in ('narrator', 'hero'):
++            (voices / f'{name}.pt').symlink_to(src / 'voices' / 'thorsten.pt')
++            (voices / f'{name}.json').write_text(
++                '{"language": "d", "model": "thorsten"}\n',
++                encoding='utf-8',
++            )
++        import shutil
++        old = os.environ.get('KOKORO_SHARE')
++        os.environ['KOKORO_SHARE'] = str(tmp)
++        try:
++            results = list(speak(
++                '<voice name="narrator">Der Star sang.</voice>'
++                '<voice name="hero" lang="a">Star Trek.</voice>',
++                voice='narrator',
++                lang='d',
++            ))
++        finally:
++            if old is None:
++                os.environ.pop('KOKORO_SHARE', None)
++            else:
++                os.environ['KOKORO_SHARE'] = old
++            shutil.rmtree(tmp, ignore_errors=True)
++        self.assertEqual(len(results), 2)
++        self.assertGreater(results[0].audio.numel(), 1000)
++        self.assertGreater(results[1].audio.numel(), 1000)
++        self.assertIn('ʃ', results[0].phonemes)
++        self.assertNotIn('stˈɑɹ', results[0].phonemes)
++        self.assertIn('stˈɑɹ', results[1].phonemes)
++        self.assertTrue(all(ch in VOCAB for ch in results[0].phonemes + results[1].phonemes))
++
++    def test_pitch_tags_sing_the_given_notes(self):
++        from kokoro.speak import iter_audio, open_models
++
++        text = (
++            '<pitch freq="440">I</pitch>'
++            '<pitch freq="523.5">like</pitch>'
++            '<pitch freq="349.23">dogs</pitch>'
++        )
++        utterances = prepare_speech(text, voice='thorsten', lang='a')
++        self.assertEqual(len(utterances), 1)
++        pitches = utterances[0].pitches
++        self.assertEqual(len(pitches), len(utterances[0].phonemes))
++        targets = []
++        for value in pitches:
++            if not isinstance(value, float):
++                continue
++            if not targets or targets[-1] != value:
++                targets.append(value)
++        self.assertEqual(targets, [440.0, 523.5, 349.23])
++        results = list(iter_audio(utterances, open_models(utterances)))
++        self.assertEqual(len(results), 1)
++        audio = results[0].audio
++        self.assertGreater(audio.numel(), 1000)
++        durations = [int(item) for item in results[0].output.pred_dur.tolist()]
++        self.assertEqual(len(durations), len(pitches) + 2)
++        self.assertEqual(audio.numel(), 600 * sum(durations))
++        samples = audio.numpy()
++        estimates = []
++        group_hz = None
++        group = []
++
++        def close_group():
++            if not group:
++                return
++            taken = []
++            for index in group:
++                start = 600 * sum(durations[:index + 1])
++                stop = start + 600 * durations[index + 1]
++                taken.append(samples[start:stop])
++            import numpy as np
++            estimates.append(_spectral_peak(np.concatenate(taken)))
++
++        for index, value in enumerate(pitches):
++            if isinstance(value, float) and (group_hz is None or value == group_hz):
++                group_hz = value
++                group.append(index)
++                continue
++            close_group()
++            group = []
++            group_hz = None
++            if isinstance(value, float):
++                group_hz = value
++                group.append(index)
++        close_group()
++        found = [(target, estimate) for target, estimate in zip(targets, estimates)]
++        self.assertEqual(len(found), 3, (utterances[0].phonemes, pitches, found))
++        for target, estimate in found:
++            self.assertIsNotNone(estimate, (utterances[0].phonemes, found))
++            self.assertLess(abs(estimate - target) / target, 0.05, found)
++
++
++class CliTests(unittest.TestCase):
++    def test_help_and_wav(self):
++        import os
++        import subprocess
++        import sys
++
++        env = os.environ.copy()
++        root = Path(__file__).resolve().parents[1]
++        env['PYTHONPATH'] = str(root) + os.pathsep + env.get('PYTHONPATH', '')
++        help_run = subprocess.run(
++            [sys.executable, '-m', 'kokoro', '--help'],
++            env=env,
++            text=True,
++            capture_output=True,
++            check=False,
++        )
++        self.assertEqual(help_run.returncode, 0, help_run.stderr)
++        self.assertIn('<lang code=', help_run.stdout)
++        self.assertIn('<pitch freq=', help_run.stdout)
++        self.assertIn('<pitch note=', help_run.stdout)
++        self.assertIn('Star Trek', help_run.stdout)
++
++        wav = Path('/tmp/kokoro-star-trek.wav')
++        if wav.exists():
++            wav.unlink()
++        run = subprocess.run(
++            [
++                sys.executable, '-m', 'kokoro',
++                '-m', 'thorsten',
++                '-o', str(wav),
++                '-t', 'Der Star mag <lang code="a">Star Trek</lang>.',
++                '--debug',
++            ],
++            env=env,
++            text=True,
++            capture_output=True,
++            check=False,
++        )
++        self.assertEqual(run.returncode, 0, run.stderr)
++        self.assertIn('stˈɑɹ', run.stderr)
++        self.assertIn('ʃ', run.stderr)
++        self.assertNotIn('☃', run.stderr)
++        with wave.open(str(wav), 'rb') as handle:
++            self.assertEqual(handle.getnchannels(), 1)
++            self.assertEqual(handle.getframerate(), 24000)
++            self.assertGreater(handle.getnframes(), 1000)
++        wav.unlink()
++
++
++if __name__ == '__main__':
++    unittest.main()
